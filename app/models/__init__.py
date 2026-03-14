@@ -7,6 +7,7 @@ This is required for Alembic migrations to detect model changes.
 from app.models.base import Base, TenantMixin, TimestampMixin
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
+from app.models.visitor import Visitor
 
 __all__ = [
     "Base",
@@ -15,4 +16,5 @@ __all__ = [
     "Tenant",
     "User",
     "UserRole",
+    "Visitor",
 ]
