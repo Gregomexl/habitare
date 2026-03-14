@@ -9,6 +9,7 @@ from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.models.visitor import Visitor
 from app.models.visit import Visit, VisitStatus
+from app.models.qr_code import QRCode, QRCodeType
 
 __all__ = [
     "Base",
@@ -20,4 +21,6 @@ __all__ = [
     "Visitor",
     "Visit",
     "VisitStatus",
+    "QRCode",
+    "QRCodeType",
 ]
