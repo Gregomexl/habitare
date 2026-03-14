@@ -11,6 +11,7 @@ from app.models.visitor import Visitor
 from app.models.visit import Visit, VisitStatus
 from app.models.qr_code import QRCode, QRCodeType
 from app.models.invitation import Invitation, InvitationStatus
+from app.models.notification import Notification, NotificationChannel, NotificationStatus
 
 __all__ = [
     "Base",
@@ -26,4 +27,7 @@ __all__ = [
     "QRCodeType",
     "Invitation",
     "InvitationStatus",
+    "Notification",
+    "NotificationChannel",
+    "NotificationStatus",
 ]
