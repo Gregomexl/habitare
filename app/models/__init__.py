@@ -8,6 +8,7 @@ from app.models.base import Base, TenantMixin, TimestampMixin
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 from app.models.visitor import Visitor
+from app.models.visit import Visit, VisitStatus
 
 __all__ = [
     "Base",
@@ -17,4 +18,6 @@ __all__ = [
     "User",
     "UserRole",
     "Visitor",
+    "Visit",
+    "VisitStatus",
 ]
