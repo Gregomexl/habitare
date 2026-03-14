@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import UUID, Boolean, ForeignKey
+from sqlalchemy import UUID, Boolean, DateTime, ForeignKey
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,10 +32,10 @@ class QRCode(Base, TenantMixin, TimestampMixin):
     type: Mapped[QRCodeType] = mapped_column(
         SAEnum(QRCodeType, name="qrcodetype"), nullable=False
     )
-    valid_from: Mapped[datetime] = mapped_column(nullable=False)
-    valid_until: Mapped[datetime] = mapped_column(nullable=False)
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # Set on first scan for ONE_TIME; used for replay detection
-    used_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_revoked: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import UUID, String, ForeignKey
+from sqlalchemy import UUID, DateTime, String, ForeignKey
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,8 +31,8 @@ class Invitation(Base, TenantMixin, TimestampMixin):
     status: Mapped[InvitationStatus] = mapped_column(
         SAEnum(InvitationStatus, name="invitationstatus"), nullable=False, default=InvitationStatus.PENDING
     )
-    sent_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     def __repr__(self) -> str:
         return f"<Invitation(id={self.id}, status={self.status})>"

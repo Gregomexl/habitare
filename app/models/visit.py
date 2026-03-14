@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import UUID, String, ForeignKey
+from sqlalchemy import UUID, DateTime, String, ForeignKey
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,9 +35,9 @@ class Visit(Base, TenantMixin, TimestampMixin):
         SAEnum(VisitStatus, name="visitstatus"), nullable=False, default=VisitStatus.SCHEDULED
     )
     # nullable — null for walk-ins
-    scheduled_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    checked_in_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    checked_out_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    checked_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    checked_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self) -> str:
         return f"<Visit(id={self.id}, status={self.status})>"

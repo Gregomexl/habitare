@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import UUID, ForeignKey
+from sqlalchemy import UUID, DateTime, ForeignKey
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -42,7 +42,7 @@ class Notification(Base, TenantMixin, TimestampMixin):
         SAEnum(NotificationStatus, name="notificationstatus"), nullable=False, default=NotificationStatus.QUEUED
     )
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    sent_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self) -> str:
         return f"<Notification(id={self.id}, channel={self.channel}, status={self.status})>"
