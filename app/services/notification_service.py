@@ -78,27 +78,32 @@ class NotificationService:
         await self.db.flush()
 
         try:
-            # Phase 2: HTTP POST to SendGrid Mail Send API
-            # Requires HABITARE_SENDGRID_API_KEY in settings
-            # and HABITARE_FROM_EMAIL for the sender address.
-            # If settings.sendgrid_api_key is empty, raises ValueError → FAILED logged.
-            if not getattr(settings, "sendgrid_api_key", None):
-                raise ValueError("HABITARE_SENDGRID_API_KEY not configured")
+            if not settings.email_enabled:
+                notification.status = NotificationStatus.SENT
+                notification.sent_at = datetime.utcnow()
+                await self.db.flush()
+                return
+            if not host_email:
+                notification.status = NotificationStatus.FAILED
+                await self.db.flush()
+                return
+            if not settings.resend_api_key:
+                raise ValueError("HABITARE_RESEND_API_KEY not configured")
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
-                    "https://api.sendgrid.com/v3/mail/send",
-                    headers={"Authorization": f"Bearer {settings.sendgrid_api_key}"},
+                    "https://api.resend.com/emails",
+                    headers={"Authorization": f"Bearer {settings.resend_api_key}"},
                     json={
-                        "personalizations": [{"to": [{"email": host_email}]}],
-                        "from": {"email": getattr(settings, "from_email", "noreply@habitare.com")},
+                        "from": settings.from_email,
+                        "to": [host_email],
                         "subject": f"Visitor {visitor_name} has arrived",
-                        "content": [{"type": "text/plain", "value": f"{visitor_name} has checked in."}],
+                        "html": f"<p><strong>{visitor_name}</strong> has checked in.</p>",
                     },
                     timeout=10.0,
                 )
                 resp.raise_for_status()
             notification.status = NotificationStatus.SENT
-            notification.sent_at = datetime.now(timezone.utc)
+            notification.sent_at = datetime.utcnow()
         except Exception as exc:
             logger.warning("Email send failed for visit %s: %s", visit_id, exc)
             notification.status = NotificationStatus.FAILED
