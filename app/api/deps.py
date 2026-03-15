@@ -1,50 +1,71 @@
 """
 FastAPI Dependency Injection
-Database session and authentication dependencies
+Database session and authentication dependencies.
 """
 import uuid
+from dataclasses import dataclass
 from typing import Annotated, AsyncGenerator
-from fastapi import Depends, Header, HTTPException
+
+from fastapi import Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session
+from app.core.jwt import decode_token
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """
-    Database session dependency with automatic cleanup.
-
-    Uses yield pattern for automatic session closing after request completion.
-    This is the FastAPI best practice for managing database sessions.
-    """
+    """Database session dependency with automatic cleanup."""
     async with async_session() as session:
         yield session
 
 
-# Type alias for cleaner endpoint signatures
 AsyncSessionDep = Annotated[AsyncSession, Depends(get_db)]
-
-
-# Temporary stub — replace with JWT-based extraction when Phase 1 auth is complete
-async def get_tenant_id(
-    x_tenant_id: str = Header(..., description="Tenant UUID (temporary — will be JWT claim)")
-) -> uuid.UUID:
-    """Extract tenant_id. Phase 2 stub: reads from X-Tenant-Id header.
-    Replace with JWT payload extraction when auth endpoints are complete."""
-    try:
-        return uuid.UUID(x_tenant_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid tenant ID format")
-
-
-TenantIdDep = Annotated[uuid.UUID, Depends(get_tenant_id)]
 
 
 async def set_rls(db: AsyncSession, tenant_id: uuid.UUID) -> None:
     """Set session-local RLS variable. Must be called inside an active transaction.
 
-    Note: asyncpg does not support parameterized SET LOCAL statements, so we use
-    f-string interpolation here. The tenant_id is a UUID, so it is safe to interpolate.
+    asyncpg does not support parameterized SET LOCAL; UUID str() is safe to
+    interpolate because uuid.UUID.__str__() always produces a well-formed UUID
+    with no SQL special characters.
     """
     await db.execute(sql_text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+
+
+@dataclass
+class TokenData:
+    """Claims extracted from a validated JWT access token."""
+    user_id: uuid.UUID
+    tenant_id: uuid.UUID
+    role: str
+
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+
+async def get_current_user(
+    token: Annotated[str, Depends(oauth2_scheme)],
+) -> TokenData:
+    """Decode JWT. No DB hit — RLS is managed per-endpoint inside db.begin() blocks.
+
+    Deactivated users retain access until the token expires (max 30 min).
+    A token blocklist is out of scope for Phase 3.
+    """
+    payload = decode_token(token)
+    try:
+        return TokenData(
+            user_id=uuid.UUID(payload["sub"]),
+            tenant_id=uuid.UUID(payload["tenant_id"]),
+            role=payload["role"],
+        )
+    except (ValueError, KeyError):
+        raise HTTPException(
+            status_code=401,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+CurrentUserDep = Annotated[TokenData, Depends(get_current_user)]
