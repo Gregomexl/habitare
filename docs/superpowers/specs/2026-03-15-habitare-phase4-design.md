@@ -73,11 +73,15 @@ def require_role(*roles: UserRole):
 
 All existing endpoints remain unchanged — they are `TENANT_USER`-accessible, which is correct. RLS already handles tenant isolation.
 
+**Admin endpoints and RLS:** Admin endpoints operate on the `tenants` table which has no RLS policy. Admin endpoint handlers do **not** call `set_rls()` — they query cross-tenant by design. This is an intentional exception to the pattern used everywhere else.
+
 ### User Management
 
 **Temp password flow:** `secrets.token_urlsafe(12)` generates a 16-character URL-safe string. Hashed with Argon2id before storage. Returned plaintext **once** in `UserCreateResponse.temp_password`. No email sent — caller shares out-of-band.
 
 **Role constraint:** `POST /users/` and `PUT /users/{id}` validate that `role != SUPER_ADMIN`. A `PROPERTY_ADMIN` cannot escalate a user to `SUPER_ADMIN`. Validated at the endpoint level (not the schema) to allow clear error messaging.
+
+**Self-edit constraint:** `PUT /users/{id}` where `id == current_user.user_id` returns 400 — use `PUT /users/me` instead. This prevents accidental self-deactivation. Admin-on-admin edits (a `PROPERTY_ADMIN` editing another `PROPERTY_ADMIN`) are permitted — the caller is assumed to be managing their own tenant staff.
 
 **RLS:** All user management endpoints operate within the caller's tenant. `set_rls(db, current_user.tenant_id)` is called before any query — RLS ensures `PUT /users/{id}` automatically returns 404 for users in other tenants.
 
@@ -85,7 +89,9 @@ All existing endpoints remain unchanged — they are `TENANT_USER`-accessible, w
 
 **Worker:** `app/worker.py` defines `WorkerSettings` with two cron jobs and a Redis pool from `settings.redis_url`. Run with: `uv run arq app.worker.WorkerSettings`.
 
-**`retry_failed_notifications`:** Queries `notifications WHERE status = 'FAILED' AND retry_count < 3 AND created_at > now() - interval '24 hours'`. For each record, re-calls `NotificationService.send_email()`. On success: `status = SENT`, `sent_at = now()`. On failure: `retry_count += 1`, `status = FAILED`. The 24-hour window prevents retrying stale failures indefinitely.
+**`retry_failed_notifications`:** Queries `notifications WHERE status = 'FAILED' AND retry_count < 3 AND created_at > now() - interval '24 hours'` **grouped by `tenant_id`**. For each tenant group the job calls `SET LOCAL app.current_tenant_id` before processing that group's notifications — this satisfies RLS on the `notifications` table. Each notification re-calls `NotificationService.send_email()`. On success: `status = SENT`, `sent_at = now()`. On failure: `retry_count += 1`, `status = FAILED`. The 24-hour window prevents retrying stale failures indefinitely.
+
+**Worker DB session and RLS:** The ARQ worker creates its own `AsyncSession` via `async_session()`. Because `notifications` is RLS-gated by `tenant_id`, the job groups failed notifications by `tenant_id` and sets `SET LOCAL app.current_tenant_id = '<tid>'` within each transaction before querying. This avoids requiring a superuser role for the worker and keeps the existing `habitare_app` non-superuser DB role.
 
 **`cleanup_expired_tokens`:** Deletes `refresh_tokens WHERE expires_at < now() - interval '30 days' OR (revoked_at IS NOT NULL AND revoked_at < now() - interval '7 days')`. Logs deleted row count. No application-layer pagination needed — DELETE with a WHERE clause is atomic.
 
@@ -163,12 +169,14 @@ PUT  /admin/tenants/{id} [SUPER_ADMIN]  — update tenant (was 501)
 class UserUpdateMe(BaseModel):
     full_name: str | None = None
     phone_number: str | None = None
+    unit_number: str | None = None
 
 class UserCreate(BaseModel):
     email: EmailStr
     full_name: str | None = None
     role: UserRole  # validated in endpoint: not SUPER_ADMIN
     phone_number: str | None = None
+    unit_number: str | None = None
 
 class UserCreateResponse(UserResponse):
     temp_password: str  # returned once, not stored
@@ -176,6 +184,7 @@ class UserCreateResponse(UserResponse):
 class UserUpdate(BaseModel):
     full_name: str | None = None
     phone_number: str | None = None
+    unit_number: str | None = None
     is_active: bool | None = None
     role: UserRole | None = None  # validated in endpoint: not SUPER_ADMIN
 ```
@@ -183,15 +192,19 @@ class UserUpdate(BaseModel):
 ### `app/schemas/tenant.py` additions
 
 ```python
+from typing import Literal
+
+SubscriptionTier = Literal["basic", "pro", "enterprise"]
+
 class TenantCreate(BaseModel):
     name: str
     slug: str  # URL-safe, unique
-    subscription_tier: str = "basic"
+    subscription_tier: SubscriptionTier = "basic"
     settings: dict = {}
 
 class TenantUpdate(BaseModel):
     name: str | None = None
-    subscription_tier: str | None = None
+    subscription_tier: SubscriptionTier | None = None
     settings: dict | None = None
 ```
 
@@ -204,7 +217,9 @@ class TenantUpdate(BaseModel):
 | Wrong role for endpoint | 403 | "Insufficient permissions" |
 | `POST /users/` with `role = SUPER_ADMIN` | 422 | "Cannot create SUPER_ADMIN accounts via API" |
 | `PUT /users/{id}` sets `role = SUPER_ADMIN` | 422 | "Cannot assign SUPER_ADMIN role via API" |
+| `PUT /users/{id}` where id == caller's own id | 400 | "Use PUT /users/me to update your own profile" |
 | `PUT /users/{id}` user not in tenant | 404 | "User not found" (RLS returns empty result) |
+| `POST /users/` with existing email in tenant | 409 | "Email already registered in this property" |
 | `PUT /admin/tenants/{id}` tenant not found | 404 | "Tenant not found" |
 | `POST /admin/tenants/` duplicate slug | 409 | "Slug already in use" |
 
@@ -231,6 +246,9 @@ class TenantUpdate(BaseModel):
 7. Login with deactivated user → 401
 8. `TENANT_USER` hits `GET /users/` → 403
 9. `POST /users/` with `role = SUPER_ADMIN` → 422
+10. `POST /users/` with duplicate email in same tenant → 409
+11. `PUT /users/{id}` where id == caller's id → 400
+12. `PROPERTY_ADMIN` in tenant A calls `PUT /users/{id}` for user in tenant B → 404 (RLS scopes result)
 
 **Integration — `tests/integration/test_admin_endpoints.py`:**
 1. Seed SUPER_ADMIN user (raw SQL, different tenant), login
