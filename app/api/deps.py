@@ -42,5 +42,9 @@ TenantIdDep = Annotated[uuid.UUID, Depends(get_tenant_id)]
 
 
 async def set_rls(db: AsyncSession, tenant_id: uuid.UUID) -> None:
-    """Set session-local RLS variable. Must be called inside an active transaction."""
-    await db.execute(sql_text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(tenant_id)})
+    """Set session-local RLS variable. Must be called inside an active transaction.
+
+    Note: asyncpg does not support parameterized SET LOCAL statements, so we use
+    f-string interpolation here. The tenant_id is a UUID, so it is safe to interpolate.
+    """
+    await db.execute(sql_text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))

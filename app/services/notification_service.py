@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 
 import httpx
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -31,23 +32,29 @@ class NotificationService:
         visitor_name: str,
         host_email: str | None,
     ) -> None:
-        """Fire email (if host set) and WebSocket broadcast."""
-        # Email — skipped if no host
-        if host_id and host_email:
-            await self._send_email(
+        """Fire email (if host set) and WebSocket broadcast.
+
+        Runs in its own transaction so RLS context is properly set for
+        notification writes (SET LOCAL is transaction-scoped).
+        """
+        async with self.db.begin():
+            await self.db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+            # Email — skipped if no host
+            if host_id and host_email:
+                await self._send_email(
+                    tenant_id=tenant_id,
+                    visit_id=visit_id,
+                    host_id=host_id,
+                    host_email=host_email,
+                    visitor_name=visitor_name,
+                )
+
+            # WebSocket — broadcast to all staff in tenant
+            await self._broadcast_ws(
                 tenant_id=tenant_id,
                 visit_id=visit_id,
-                host_id=host_id,
-                host_email=host_email,
                 visitor_name=visitor_name,
             )
-
-        # WebSocket — broadcast to all staff in tenant
-        await self._broadcast_ws(
-            tenant_id=tenant_id,
-            visit_id=visit_id,
-            visitor_name=visitor_name,
-        )
 
     async def _send_email(
         self,
