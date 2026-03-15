@@ -17,18 +17,18 @@ Harden the application for production deployment by fixing four gaps: email deli
 
 ### In scope
 
-- **Email delivery** — Replace raw SendGrid `httpx` call with the `resend` Python SDK; add `email_enabled` flag to skip sends in test environments
-- **Rate limiting** — `slowapi` guards on auth endpoints (per IP) and all other routes (per tenant); in-memory store (single server)
-- **Structured error responses** — Consistent `{"error": {"code", "message", "detail", "request_id"}}` envelope across all error paths; catch-all 500 handler suppresses tracebacks
-- **Request ID middleware** — `X-Request-ID` on every response; echoes client-supplied value or generates UUID
-- **Configurable CORS** — `HABITARE_CORS_ORIGINS` setting replaces hardcoded `localhost:3000`; `X-Request-ID` added to exposed headers
+- **Email delivery** — Replace raw SendGrid `httpx` call with Resend's API via `httpx.AsyncClient` (keeps async-safe pattern); add `email_enabled` flag to skip sends in test environments; set `resend_api_key` once at startup
+- **Rate limiting** — Single `slowapi` limiter with per-route key function overrides; `SlowAPIASGIMiddleware` (avoids `BaseHTTPMiddleware` streaming issues); auth endpoints keyed by IP, authenticated routes by `tenant_id`
+- **Structured error responses** — Consistent `{"error": {"code", "message", "detail", "request_id"}}` envelope; handlers registered on `StarletteHTTPException` (catches routing-level 404/405 too); catch-all 500 suppresses tracebacks
+- **Request ID middleware** — Pure ASGI middleware (not `BaseHTTPMiddleware`) adds `X-Request-ID` to every response; echoes client-supplied value or generates UUID
+- **Configurable CORS** — Update existing `cors_origins` setting wiring in `main.py` (field already exists in `config.py`); add `X-Request-ID` to exposed headers
 
 ### Out of scope
 
 - Sentry, structlog, Prometheus — Phase 6 (alongside deployment)
 - Per-tier rate limits (basic/pro/enterprise) — Phase 6 (requires billing flow)
 - Cloudflare Tunnel, launchd services, production Docker Compose — Phase 6
-- Email templates (HTML) — Phase 6
+- Email HTML templates — Phase 6
 
 ---
 
@@ -36,63 +36,102 @@ Harden the application for production deployment by fixing four gaps: email deli
 
 ### Email Delivery (Resend)
 
-The `NotificationService._send_email()` method is the single point of email dispatch — used by the visit check-in flow (immediate send via `BackgroundTasks`) and the ARQ retry job (`retry_failed_notifications`). Only this method changes; all callers remain untouched.
+The current `_send_email` in `NotificationService` makes an `httpx.AsyncClient` POST to SendGrid. We keep the same async pattern but swap the endpoint, headers, and body to Resend's API. This avoids the sync-blocking problem that would occur with the `resend` Python SDK (which is synchronous and would block the event loop if called directly in an async function).
+
+`resend_api_key` is set once at application startup in `app/main.py` (or a lifespan event) — not on every call, which would be a global mutation race condition.
 
 ```python
-# app/services/notification.py
-import resend
+# app/services/notification.py — only the inner _send_email implementation changes
+# The method signature and all callers remain identical.
 
-async def _send_email(self, to: str, subject: str, html: str) -> None:
+async def _send_email(self, *, to: str, subject: str, html: str) -> None:
+    """Send email via Resend API using httpx (async-safe)."""
     if not settings.email_enabled:
         return
-    resend.api_key = settings.resend_api_key
-    resend.Emails.send({
-        "from": settings.from_email,
-        "to": to,
-        "subject": subject,
-        "html": html,
-    })
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+            json={
+                "from": settings.from_email,
+                "to": [to],
+                "subject": subject,
+                "html": html,
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
 ```
 
-`email_enabled = False` in the test environment prevents any real sends during CI. The `resend` SDK raises on HTTP errors — the existing `try/except` in `_send_email` catches these and increments `retry_count`, keeping the retry loop intact.
+**Note:** The existing `try/except` in the calling code catches `httpx.HTTPError` — this remains intact. On failure, `retry_count` is incremented and the ARQ retry job handles recovery.
+
+**Startup wiring** — add to `app/main.py` (or lifespan):
+```python
+# Validate email config at startup, not per-request
+if settings.email_enabled and not settings.resend_api_key:
+    raise RuntimeError("HABITARE_RESEND_API_KEY must be set when email_enabled=True")
+```
 
 ### Rate Limiting (slowapi)
 
-Two limiters — one keyed by IP (for unauthenticated auth routes), one keyed by `tenant_id` extracted from the JWT (for authenticated routes).
+**Single limiter** with `get_tenant_key` as the default key function. Auth endpoints override with `key_func=get_remote_address` at the decorator level — this is the idiomatic slowapi pattern and avoids the `app.state.limiter` confusion of registering two separate limiters.
 
 ```python
 # app/core/limiter.py
+import jwt as pyjwt
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from app.core.config import settings
 
 def get_tenant_key(request: Request) -> str:
-    """Extract tenant_id from JWT for authed routes; fall back to IP."""
+    """Extract tenant_id from JWT for authed routes; fall back to IP.
+
+    Uses raw jwt.decode() — NOT decode_token() from app/core/jwt.py.
+    decode_token() raises HTTPException (wrong contract for a key function).
+    Raw decode with verify=False is safe here because we only need the
+    tenant_id claim for rate limiting, not for authentication.
+    """
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         try:
-            payload = decode_token(auth.removeprefix("Bearer "))
-            return payload.get("tenant_id", get_remote_address(request))
+            payload = pyjwt.decode(
+                auth.removeprefix("Bearer "),
+                options={"verify_signature": False},
+            )
+            tenant_id = payload.get("tenant_id")
+            if tenant_id:
+                return tenant_id
         except Exception:
             pass
     return get_remote_address(request)
 
-ip_limiter = Limiter(key_func=get_remote_address)
-tenant_limiter = Limiter(key_func=get_tenant_key)
+limiter = Limiter(key_func=get_tenant_key)
 ```
 
-**Limits by endpoint group:**
+**Registration in `main.py`:**
+```python
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIASGIMiddleware  # NOT SlowAPIMiddleware
 
-| Group | Limit | Key |
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIASGIMiddleware)  # pure ASGI — no BaseHTTPMiddleware
+```
+
+**Note:** `SlowAPIASGIMiddleware` is used instead of `SlowAPIMiddleware`. The ASGI variant avoids the `BaseHTTPMiddleware` streaming response and exception handler interaction issues present in newer FastAPI/Starlette versions.
+
+**Limits by endpoint:**
+
+| Endpoint | Limit | Key override |
 |---|---|---|
-| `POST /auth/login` | 5/minute | IP |
-| `POST /auth/refresh` | 10/minute | IP |
-| `POST /auth/logout` | 20/minute | IP |
-| All other `POST`/`PUT`/`DELETE` | 60/minute | tenant_id |
-| All `GET` (authenticated) | 200/minute | tenant_id |
+| `POST /auth/login` | 5/minute | `key_func=get_remote_address` |
+| `POST /auth/refresh` | 10/minute | `key_func=get_remote_address` |
+| `POST /auth/logout` | 20/minute | `key_func=get_remote_address` |
+| All other `POST`/`PUT`/`DELETE` | 60/minute | default (`tenant_id`) |
+| All `GET` (authenticated) | 200/minute | default (`tenant_id`) |
 
-Rate limit violations return `429 Too Many Requests` using the standard error envelope.
-
-`slowapi` uses in-memory storage — limits reset on process restart. Appropriate for a single Mac Mini server. Cloudflare's rate limiting (Phase 6) adds a second layer before traffic reaches the app.
+Rate limit violations return `429 Too Many Requests` using the standard error envelope (see below). `_rate_limit_exceeded_handler` is replaced by a custom handler that wraps the response in the error envelope.
 
 ### Structured Error Responses
 
@@ -101,48 +140,126 @@ All error responses share one envelope shape:
 ```json
 {
   "error": {
-    "code": "RATE_LIMIT_EXCEEDED",
-    "message": "Too many requests",
-    "detail": null,
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid request body",
+    "detail": [{"loc": ["body", "email"], "msg": "value is not a valid email"}],
     "request_id": "a3f8c2d1-4e5b-..."
   }
 }
 ```
 
-**Exception handlers registered in `app/main.py`:**
+**Critical:** Handlers are registered on `StarletteHTTPException` (from `starlette.exceptions`), not `fastapi.HTTPException`. This ensures routing-level errors (404 Not Found for unknown routes, 405 Method Not Allowed) also return the envelope shape — not Starlette's default `{"detail": "..."}`.
 
-| Exception type | Status | `code` |
-|---|---|---|
-| `HTTPException` | `exc.status_code` | `HTTP_<status>` |
-| `RequestValidationError` | 422 | `VALIDATION_ERROR` |
-| `RateLimitExceeded` | 429 | `RATE_LIMIT_EXCEEDED` |
-| `Exception` (catch-all) | 500 | `INTERNAL_ERROR` |
+```python
+# app/main.py
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exceptions import RequestValidationError
+from slowapi.errors import RateLimitExceeded
 
-The catch-all handler logs the full traceback server-side but returns only `INTERNAL_ERROR` to the client — no stack traces exposed in production.
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {
+            "code": f"HTTP_{exc.status_code}",
+            "message": str(exc.detail),
+            "detail": None,
+            "request_id": getattr(request.state, "request_id", None),
+        }},
+    )
 
-### Request ID Middleware
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Invalid request body",
+            "detail": exc.errors(),
+            "request_id": getattr(request.state, "request_id", None),
+        }},
+    )
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"error": {
+            "code": "RATE_LIMIT_EXCEEDED",
+            "message": "Too many requests",
+            "detail": None,
+            "request_id": getattr(request.state, "request_id", None),
+        }},
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    import logging
+    logging.getLogger("habitare").exception("Unhandled error: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"error": {
+            "code": "INTERNAL_ERROR",
+            "message": "An internal error occurred",
+            "detail": None,
+            "request_id": getattr(request.state, "request_id", None),
+        }},
+    )
+```
+
+`getattr(request.state, "request_id", None)` is safe even if the middleware hasn't run (e.g., very early errors).
+
+### Request ID Middleware (Pure ASGI)
+
+Pure ASGI middleware — no `BaseHTTPMiddleware` — avoids the exception handler interaction issues and streaming response buffering:
 
 ```python
 # app/middleware/request_id.py
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+import uuid
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+class RequestIDMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-        request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
+        scope["state"]["request_id"] = request_id  # accessible as request.state.request_id
+
+        async def send_with_header(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.append("X-Request-ID", request_id)
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)
 ```
 
-`request.state.request_id` is available to exception handlers so the same ID appears in both the response header and the error envelope body.
+Registration order in `main.py` matters — `RequestIDMiddleware` must be added **before** `SlowAPIASGIMiddleware` so `request_id` is set when exception handlers run:
+```python
+app.add_middleware(RequestIDMiddleware)   # outermost — runs first on request
+app.add_middleware(SlowAPIASGIMiddleware) # inner
+```
 
 ### Configurable CORS
 
-```python
-# app/core/config.py
-cors_origins: list[str] = ["http://localhost:3000"]
-```
+`cors_origins: list[str]` already exists in `app/core/config.py`. The change is in `app/main.py` — replace the hardcoded list with `settings.cors_origins` and add `X-Request-ID` to `expose_headers`:
 
-Parsed from `HABITARE_CORS_ORIGINS` env var (JSON array string). `X-Request-ID` added to `expose_headers` so frontend code can read it from error responses.
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,   # was: ["http://localhost:3000"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],       # new: frontend can read request ID
+)
+```
 
 ---
 
@@ -150,27 +267,28 @@ Parsed from `HABITARE_CORS_ORIGINS` env var (JSON array string). `X-Request-ID` 
 
 | File | Change |
 |---|---|
-| `app/core/config.py` | Add `resend_api_key`, `from_email`, `email_enabled`, `cors_origins` |
-| `app/core/limiter.py` | Create — `ip_limiter`, `tenant_limiter`, `get_tenant_key` |
-| `app/middleware/__init__.py` | Create — package init |
-| `app/middleware/request_id.py` | Create — `RequestIDMiddleware` |
-| `app/services/notification.py` | Modify `_send_email()` — swap SendGrid for Resend SDK |
-| `app/main.py` | Register middleware, exception handlers, rate limiters; update CORS |
-| `.env.example` | Add new env vars |
-| `tests/unit/test_rate_limiting.py` | Unit tests for limiter key functions |
-| `tests/unit/test_error_handlers.py` | Unit tests for exception handler shapes |
-| `tests/integration/test_email_delivery.py` | Integration test — mocked Resend send |
+| `pyproject.toml` | Add `resend` (unused, kept for future SDK), `slowapi` via `uv add slowapi` |
+| `app/core/config.py` | Add `resend_api_key`, `from_email`, `email_enabled`; `cors_origins` already exists |
+| `app/core/limiter.py` | Create — `limiter`, `get_tenant_key` |
+| `app/middleware/__init__.py` | Create — package init (empty) |
+| `app/middleware/request_id.py` | Create — pure ASGI `RequestIDMiddleware` |
+| `app/services/notification.py` | Modify `_send_email()` — swap SendGrid endpoint for Resend API |
+| `app/main.py` | Register middleware (correct order), exception handlers, CORS update, startup validation |
+| `.env.example` | Add `HABITARE_RESEND_API_KEY`, `HABITARE_FROM_EMAIL`, `HABITARE_EMAIL_ENABLED` |
+| `tests/unit/test_rate_limiting.py` | Unit tests for `get_tenant_key` |
+| `tests/unit/test_error_handlers.py` | Unit tests for exception handler shapes + request ID |
+| `tests/integration/test_email_delivery.py` | Integration test — mock httpx, verify Resend API call shape |
 
 ---
 
 ## Settings additions
 
 ```python
-# app/core/config.py additions
-resend_api_key: str = ""              # HABITARE_RESEND_API_KEY
-from_email: str = "noreply@habitare.app"  # HABITARE_FROM_EMAIL
-email_enabled: bool = True            # HABITARE_EMAIL_ENABLED (set False in tests)
-cors_origins: list[str] = ["http://localhost:3000"]  # HABITARE_CORS_ORIGINS
+# app/core/config.py — new fields only (cors_origins already exists)
+resend_api_key: str = ""                       # HABITARE_RESEND_API_KEY
+from_email: str = "noreply@habitare.app"       # HABITARE_FROM_EMAIL
+email_enabled: bool = True                     # HABITARE_EMAIL_ENABLED
+# cors_origins: list[str] already present — no change needed
 ```
 
 `.env.example` additions:
@@ -185,7 +303,7 @@ HABITARE_CORS_ORIGINS=["http://localhost:3000"]
 
 ## Error Response Format
 
-All existing `HTTPException` raises remain unchanged — the exception handler wraps them in the envelope automatically. No endpoint code changes needed.
+All existing `HTTPException` raises remain unchanged — the exception handler wraps them automatically. No endpoint code changes needed.
 
 **Before (current):**
 ```json
@@ -206,7 +324,7 @@ All existing `HTTPException` raises remain unchanged — the exception handler w
 
 **Validation error (before):**
 ```json
-{"detail": [{"loc": ["body", "email"], "msg": "value is not a valid email", "type": "value_error.email"}]}
+{"detail": [{"loc": ["body", "email"], "msg": "value is not a valid email"}]}
 ```
 
 **After:**
@@ -226,24 +344,23 @@ All existing `HTTPException` raises remain unchanged — the exception handler w
 ## Testing
 
 ### Unit — `tests/unit/test_rate_limiting.py`
-- `get_tenant_key` returns `tenant_id` when valid JWT present
-- `get_tenant_key` falls back to IP when no Authorization header
-- `get_tenant_key` falls back to IP when JWT is invalid/expired
+- `get_tenant_key` returns `tenant_id` when valid JWT present (uses `verify_signature=False`)
+- `get_tenant_key` falls back to IP when no `Authorization` header
+- `get_tenant_key` falls back to IP when JWT is malformed
+- `get_tenant_key` falls back to IP when JWT has no `tenant_id` claim
 
 ### Unit — `tests/unit/test_error_handlers.py`
-- `HTTPException(403)` → envelope with `code="HTTP_403"`, `status=403`
-- `RequestValidationError` → envelope with `code="VALIDATION_ERROR"`, `status=422`
-- Unhandled `Exception` → envelope with `code="INTERNAL_ERROR"`, `status=500`, no traceback in body
-- All responses include `X-Request-ID` header
+- `HTTPException(403)` → envelope with `code="HTTP_403"`, `status=403`, `request_id` present
+- Unknown route → `StarletteHTTPException(404)` → envelope (not raw `{"detail": "Not Found"}`)
+- `RequestValidationError` → `code="VALIDATION_ERROR"`, `status=422`, `detail` contains error list
+- Unhandled `Exception` → `code="INTERNAL_ERROR"`, `status=500`, no traceback in `detail`
+- Client-supplied `X-Request-ID: my-id` → response header `X-Request-ID: my-id` (echoed, not overwritten)
+- No client `X-Request-ID` → response header contains generated UUID
 
 ### Integration — `tests/integration/test_email_delivery.py`
-- Mock `resend.Emails.send` — verify called with correct `to`, `from`, `subject`
-- `email_enabled=False` → `resend.Emails.send` never called
-- Notification with missing `to` in payload → skipped gracefully
-
-### Integration — `tests/integration/test_rate_limiting.py`
-- `POST /auth/login` 6th attempt in 1 minute → 429 with error envelope
-- Authenticated `POST` 61st attempt → 429
+- Mock `httpx.AsyncClient.post` — verify called with Resend URL, correct auth header, correct body shape (`from`, `to`, `subject`, `html`)
+- `email_enabled=False` → `httpx.AsyncClient.post` never called
+- Notification with missing `to` in payload → skipped gracefully, no exception
 
 ---
 
@@ -251,9 +368,14 @@ All existing `HTTPException` raises remain unchanged — the exception handler w
 
 | Decision | Choice | Reason |
 |---|---|---|
+| Email HTTP client | `httpx.AsyncClient` (kept) | Resend SDK is sync — would block event loop; keeping httpx maintains async-safe pattern |
+| `resend_api_key` initialization | Once at startup | Per-call global mutation is not thread-safe under async concurrency |
 | Rate limit storage | In-memory (slowapi default) | Single Mac Mini server; Redis adds complexity with no benefit at this scale |
 | Rate limit key for auth | IP address | No JWT exists yet at login time |
 | Rate limit key for authed routes | `tenant_id` | Prevents one tenant's traffic from affecting another |
-| Email provider | Resend | Simpler API than SendGrid, better free tier, Cloudflare DNS integration in Phase 6 |
+| JWT decode in key function | `verify_signature=False` | Key function only needs `tenant_id` claim for bucketing, not authentication |
+| Middleware pattern | Pure ASGI (not `BaseHTTPMiddleware`) | Avoids streaming/exception handler interaction bugs in Starlette |
+| ASGI rate limit middleware | `SlowAPIASGIMiddleware` | ASGI variant preferred over `SlowAPIMiddleware` for same reason |
+| HTTP exception handler target | `StarletteHTTPException` | Catches routing-level 404/405 in addition to app-raised `HTTPException` |
 | Traceback exposure | Suppressed in response | Logged server-side; never sent to client |
 | CORS wildcard | Not used | Explicit origin list even for development |
