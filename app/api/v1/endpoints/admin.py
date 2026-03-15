@@ -1,6 +1,6 @@
 """Admin endpoints — SUPER_ADMIN only. No set_rls() — tenants table has no RLS."""
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select, text
@@ -77,6 +77,6 @@ async def update_tenant(
             tenant.subscription_tier = body.subscription_tier
         if body.settings is not None:
             tenant.settings = body.settings
-        tenant.updated_at = datetime.now(timezone.utc)
+        tenant.updated_at = datetime.utcnow()
 
     return tenant
