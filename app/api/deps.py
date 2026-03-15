@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session
 from app.core.jwt import decode_token
+from app.models.user import UserRole
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -69,3 +70,23 @@ async def get_current_user(
 
 
 CurrentUserDep = Annotated[TokenData, Depends(get_current_user)]
+
+
+def require_role(*roles: UserRole):
+    """Dependency factory: raises 403 if current user's role is not in `roles`.
+
+    Usage:
+        async def my_endpoint(current_user: RequireAdminDep, ...): ...
+
+    Note: require_role() returns the inner async function (not Depends). Wrap in
+    Annotated[TokenData, Depends(...)] to create typed aliases (see below).
+    """
+    async def check(current_user: CurrentUserDep) -> TokenData:
+        if current_user.role not in roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return current_user
+    return check
+
+
+RequireAdminDep = Annotated[TokenData, Depends(require_role(UserRole.PROPERTY_ADMIN, UserRole.SUPER_ADMIN))]
+RequireSuperAdminDep = Annotated[TokenData, Depends(require_role(UserRole.SUPER_ADMIN))]
