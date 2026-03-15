@@ -51,7 +51,7 @@ async def login(body: LoginRequest, db: AsyncSessionDep) -> TokenResponse:
         if not verify_password(body.password, user.password_hash):
             raise _invalid
 
-        user.last_login_at = datetime.now(timezone.utc)
+        user.last_login_at = datetime.utcnow()
 
         raw = secrets.token_urlsafe(32)
         rt = RefreshToken(
