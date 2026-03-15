@@ -6,20 +6,24 @@ from httpx import AsyncClient, ASGITransport
 from sqlalchemy import text, select
 from app.main import app
 from app.core.database import async_session, engine
+from app.core.security import hash_password
 from app.models.qr_code import QRCode
 from app.models.invitation import Invitation
 
 TENANT_ID = str(uuid.uuid4())
-HEADERS = {"X-Tenant-Id": TENANT_ID}
+USER_EMAIL = f"testuser-{TENANT_ID[:8]}@example.com"
+USER_PASSWORD = "test-password-123"
+ACCESS_TOKEN = None
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def setup_tenant():
-    """Insert test tenant; delete all tenant data in FK-safe order on teardown.
+    """Insert test tenant and user; delete all tenant data in FK-safe order on teardown.
 
     Disposes the engine before and after to prevent asyncpg event-loop conflicts
     when the full test suite runs (each test gets a fresh event loop in STRICT mode).
     """
+    global ACCESS_TOKEN
     await engine.dispose()
     async with async_session() as session:
         async with session.begin():
@@ -31,6 +35,31 @@ async def setup_tenant():
                 """),
                 {"id": TENANT_ID, "slug": f"test-{TENANT_ID[:8]}"},
             )
+
+    user_id = str(uuid.uuid4())
+    pw_hash = hash_password(USER_PASSWORD)
+    async with async_session() as session:
+        async with session.begin():
+            await session.execute(
+                text(f"SET LOCAL app.current_tenant_id = '{TENANT_ID}'")
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO users (id, tenant_id, email, password_hash, role, "
+                    "is_active, email_verified, created_at, updated_at) "
+                    "VALUES (:id, :tid, :email, :pw, 'TENANT_USER', true, true, now(), now())"
+                ),
+                {"id": user_id, "tid": TENANT_ID, "email": USER_EMAIL, "pw": pw_hash},
+            )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/auth/login",
+            json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
+        )
+        assert resp.status_code == 200, f"Login failed: {resp.text}"
+        ACCESS_TOKEN = resp.json()["access_token"]
+
     yield
     async with async_session() as session:
         async with session.begin():
@@ -50,7 +79,7 @@ async def test_walk_in_flow():
         resp = await client.post(
             "/api/v1/visitors/",
             json={"name": "Walk-In Guest"},
-            headers=HEADERS,
+            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
         )
         assert resp.status_code == 201
         visitor_id = resp.json()["id"]
@@ -60,7 +89,7 @@ async def test_walk_in_flow():
         resp = await client.post(
             "/api/v1/visits/",
             json={"visitor_id": visitor_id, "purpose": "Delivery"},
-            headers=HEADERS,
+            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
         )
         assert resp.status_code == 201
         visit_id = resp.json()["id"]
@@ -91,16 +120,16 @@ async def test_walk_in_flow():
         assert "qr_code_url" in resp.json()
 
         # 5. Scan the QR code (staff action)
-        resp = await client.get(f"/api/v1/qr/{code}", headers=HEADERS)
+        resp = await client.get(f"/api/v1/qr/{code}", headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
         assert resp.status_code == 200
         assert resp.json()["visit_id"] == visit_id
 
         # 6. Verify visit is now CHECKED_IN
-        resp = await client.get(f"/api/v1/visits/{visit_id}", headers=HEADERS)
+        resp = await client.get(f"/api/v1/visits/{visit_id}", headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
         assert resp.status_code == 200
         assert resp.json()["status"] == "checked_in"
 
         # 7. Check out
-        resp = await client.post(f"/api/v1/visits/{visit_id}/check-out", headers=HEADERS)
+        resp = await client.post(f"/api/v1/visits/{visit_id}/check-out", headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
         assert resp.status_code == 200
         assert resp.json()["status"] == "checked_out"
