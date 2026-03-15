@@ -1,11 +1,13 @@
 import io
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 import zxingcpp
 from PIL import Image
 
+from app.models.qr_code import QRCodeType
 from app.services.qr_service import QRService, QRValidationError
 
 
@@ -22,8 +24,6 @@ def make_qr_code(
     valid_until=None,
 ):
     """Build a minimal qr_code-like object for testing."""
-    from types import SimpleNamespace
-    from app.models.qr_code import QRCodeType
     return SimpleNamespace(
         code=uuid.uuid4(),
         type=QRCodeType(type),
@@ -40,6 +40,14 @@ def test_validate_raises_on_revoked():
         QRService.validate(qr)
 
 
+def test_validate_revoked_wins_over_used():
+    """is_revoked check must fire before used_at check — revoked always returns 410."""
+    qr = make_qr_code(is_revoked=True, used_at=utcnow() - timedelta(minutes=1))
+    with pytest.raises(QRValidationError) as exc_info:
+        QRService.validate(qr)
+    assert exc_info.value.http_status == 410
+
+
 def test_validate_raises_on_expired_time_bounded():
     qr = make_qr_code(
         type="time_bounded",
@@ -47,6 +55,16 @@ def test_validate_raises_on_expired_time_bounded():
         valid_until=utcnow() - timedelta(hours=1),
     )
     with pytest.raises(QRValidationError, match="expired"):
+        QRService.validate(qr)
+
+
+def test_validate_raises_on_not_yet_valid_time_bounded():
+    qr = make_qr_code(
+        type="time_bounded",
+        valid_from=utcnow() + timedelta(hours=1),
+        valid_until=utcnow() + timedelta(hours=2),
+    )
+    with pytest.raises(QRValidationError, match="not yet valid"):
         QRService.validate(qr)
 
 

@@ -62,8 +62,8 @@ class QRService:
         - Calling NotificationService.notify_checkin(...) after check-in commits
 
         Raises:
-          QRValidationError — with http_status set to appropriate HTTP code
-          (404 wrapped at endpoint level via scalar_one_or_none() check)
+          QRValidationError — with http_status set to appropriate HTTP code.
+          Includes 404 if code does not exist.
         """
         result = await self.db.execute(
             select(QRCode).where(QRCode.code == code)
@@ -87,7 +87,6 @@ class QRService:
         Returns raw PNG bytes suitable for streaming as image/png.
         """
         qr = qrcode.QRCode(
-            version=1,
             error_correction=qrcode.constants.ERROR_CORRECT_M,
             box_size=10,
             border=4,
