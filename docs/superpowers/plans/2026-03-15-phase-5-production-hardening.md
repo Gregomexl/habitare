@@ -60,6 +60,8 @@ Read the existing `.env.example` file first, then append these lines at the end:
 HABITARE_RESEND_API_KEY=re_your_key_here
 HABITARE_FROM_EMAIL=noreply@yourdomain.com
 HABITARE_EMAIL_ENABLED=true
+# CORS allowed origins (JSON array string)
+HABITARE_CORS_ORIGINS=["http://localhost:3000"]
 ```
 
 - [ ] **Step 3: Verify settings load cleanly**
@@ -255,18 +257,56 @@ Read the file. Find the `try` block inside `_retry_for_tenant` that posts to Sen
                     logger.warning("Retry failed for notification %s (attempt %d): %s", notif.id, notif.retry_count, exc)
 ```
 
+- [ ] **Step 4b: Add third integration test — missing `to` in payload**
+
+Append to `tests/integration/test_email_delivery.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_send_email_handles_missing_host_email_gracefully(monkeypatch):
+    """_send_email called with no host_email should not raise — handled in service."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "email_enabled", True)
+    monkeypatch.setattr(settings, "resend_api_key", "re_test_key")
+
+    import uuid
+    from app.services.notification_service import NotificationService
+    from unittest.mock import AsyncMock, MagicMock as MM, patch
+
+    db = MM()
+    db.add = MM()
+    db.flush = AsyncMock()
+    db.begin = MM()
+    db.begin.return_value.__aenter__ = AsyncMock(return_value=db)
+    db.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    db.execute = AsyncMock()
+
+    svc = NotificationService(db)
+    # Should not raise even if host_email is empty string
+    try:
+        await svc._send_email(
+            tenant_id=uuid.uuid4(),
+            visit_id=uuid.uuid4(),
+            host_id=uuid.uuid4(),
+            host_email="",  # missing / empty
+            visitor_name="Bob",
+        )
+    except Exception as exc:
+        pytest.fail(f"_send_email raised unexpectedly: {exc}")
+```
+
 - [ ] **Step 5: Run tests to confirm pass**
 
 ```bash
 uv run pytest tests/integration/test_email_delivery.py -v --tb=short
 ```
 
-Expected: `2 passed`
+Expected: `3 passed`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/services/notification_service.py app/jobs/retry_notifications.py tests/integration/test_email_delivery.py
+git add app/services/notification_service.py app/jobs/retry_notifications.py tests/integration/
 git commit -m "feat(email): swap SendGrid for Resend API; add email_enabled flag"
 ```
 
@@ -282,13 +322,13 @@ git commit -m "feat(email): swap SendGrid for Resend API; add email_enabled flag
 
 **Codebase context:** `app/core/jwt.py` has `decode_token()` which raises `HTTPException` — the wrong contract for a rate-limit key function. Use `jwt.decode()` directly with `verify_signature=False` for the key function (we only need `tenant_id` for bucketing, not authentication). `app/core/config.py` has `settings.secret_key` and `settings.algorithm`. `slowapi` confirmed by Context7: single `Limiter` instance, `app.state.limiter = limiter`, per-route key override via `@limiter.limit("N/period", key_func=fn)`.
 
-- [ ] **Step 1: Install slowapi**
+- [ ] **Step 1: Install slowapi and resend**
 
 ```bash
-uv add slowapi
+uv add slowapi resend
 ```
 
-Expected: `slowapi` added to `pyproject.toml` and `uv.lock`.
+Expected: `slowapi` and `resend` added to `pyproject.toml` and `uv.lock`. (`resend` SDK is not used in Phase 5 — kept for future SDK use per spec.)
 
 - [ ] **Step 2: Write failing unit tests**
 
@@ -426,7 +466,7 @@ Expected: `4 passed`
 
 ```bash
 git add app/core/limiter.py tests/unit/test_rate_limiting.py pyproject.toml uv.lock
-git commit -m "feat(limiter): add slowapi rate limiter with tenant-keyed key function"
+git commit -m "feat(limiter): add slowapi+resend deps and tenant-keyed rate limiter"
 ```
 
 ---
@@ -570,6 +610,26 @@ async def test_validation_error_returns_error_envelope():
     body = resp.json()
     assert body["error"]["code"] == "VALIDATION_ERROR"
     assert isinstance(body["error"]["detail"], list)
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_returns_429_after_limit():
+    """6th login attempt in same minute should return 429 with error envelope."""
+    from app.main import app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for _ in range(5):
+            await client.post(
+                "/api/v1/auth/login",
+                json={"email": "x@x.com", "password": "pw", "tenant_id": "00000000-0000-0000-0000-000000000000"},
+            )
+        resp = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "x@x.com", "password": "pw", "tenant_id": "00000000-0000-0000-0000-000000000000"},
+        )
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    assert "request_id" in body["error"]
 ```
 
 - [ ] **Step 3: Run to confirm failure**
@@ -604,7 +664,7 @@ class RequestIDMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] not in ("http",):
+        if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
 
@@ -693,7 +753,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONRe
         status_code=429,
         content={"error": {
             "code": "RATE_LIMIT_EXCEEDED",
-            "message": "Too many requests. Please try again later.",
+            "message": "Too many requests",
             "detail": None,
             "request_id": _request_id(request),
         }},
@@ -749,7 +809,6 @@ import logging
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIASGIMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -845,7 +904,7 @@ async def health_check():
 uv run pytest tests/unit/test_error_handlers.py -v --tb=short
 ```
 
-Expected: `5 passed`
+Expected: `6 passed`
 
 - [ ] **Step 3: Run full test suite to confirm no regressions**
 
