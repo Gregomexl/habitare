@@ -56,17 +56,17 @@ async def _retry_for_tenant(tenant_id) -> None:
                     continue
 
                 try:
-                    if not getattr(settings, "sendgrid_api_key", None):
-                        raise ValueError("HABITARE_SENDGRID_API_KEY not configured")
+                    if not settings.resend_api_key:
+                        raise ValueError("HABITARE_RESEND_API_KEY not configured")
                     async with httpx.AsyncClient() as client:
                         resp = await client.post(
-                            "https://api.sendgrid.com/v3/mail/send",
-                            headers={"Authorization": f"Bearer {settings.sendgrid_api_key}"},
+                            "https://api.resend.com/emails",
+                            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
                             json={
-                                "personalizations": [{"to": [{"email": email_to}]}],
-                                "from": {"email": getattr(settings, "from_email", "noreply@habitare.com")},
+                                "from": settings.from_email,
+                                "to": [email_to],
                                 "subject": f"Visitor {visitor_name} has arrived",
-                                "content": [{"type": "text/plain", "value": f"{visitor_name} has checked in."}],
+                                "html": f"<p><strong>{visitor_name}</strong> has checked in.</p>",
                             },
                             timeout=10.0,
                         )
