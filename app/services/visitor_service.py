@@ -20,8 +20,14 @@ class VisitorService:
         photo_url: str | None = None,
         vehicle_plate: str | None = None,
     ) -> Visitor:
-        """Return existing visitor if email matches within tenant; create otherwise."""
-        if email:
+        """Return existing visitor if email matches within tenant; create otherwise.
+
+        Dedup: if email is not None and matches an existing visitor in the same tenant,
+        the existing record is returned. Walk-ins (email=None) always create a new record.
+        Concurrent creates with the same email may raise IntegrityError — caller must handle.
+        Tenant isolation is enforced by RLS (SET LOCAL app.current_tenant_id).
+        """
+        if email is not None:
             result = await self.db.execute(
                 select(Visitor).where(
                     Visitor.tenant_id == tenant_id,
@@ -74,11 +80,11 @@ class VisitorService:
         limit: int = 50,
         offset: int = 0,
     ) -> list[Visitor]:
-        q = select(Visitor).order_by(Visitor.created_at.desc())
+        q = select(Visitor)
         if search:
             q = q.where(
                 Visitor.name.ilike(f"%{search}%") | Visitor.email.ilike(f"%{search}%")
             )
-        q = q.limit(limit).offset(offset)
+        q = q.order_by(Visitor.created_at.desc()).limit(limit).offset(offset)
         result = await self.db.execute(q)
         return list(result.scalars().all())
