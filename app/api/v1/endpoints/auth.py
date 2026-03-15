@@ -4,12 +4,14 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from slowapi.util import get_remote_address
 from sqlalchemy import select
 
 from app.api.deps import AsyncSessionDep, CurrentUserDep, set_rls
 from app.core.config import settings
 from app.core.jwt import create_access_token
+from app.core.limiter import limiter
 from app.core.security import verify_password
 from app.models.token import RefreshToken
 from app.models.user import User
@@ -32,7 +34,8 @@ def _token_response(user_id, tenant_id, role, raw_refresh: str) -> TokenResponse
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSessionDep) -> TokenResponse:
+@limiter.limit("5/minute", key_func=get_remote_address)
+async def login(request: Request, body: LoginRequest, db: AsyncSessionDep) -> TokenResponse:
     """Authenticate with email + password + tenant_id. Returns JWT pair."""
     async with db.begin():
         await set_rls(db, body.tenant_id)
@@ -68,7 +71,8 @@ async def login(body: LoginRequest, db: AsyncSessionDep) -> TokenResponse:
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh(body: RefreshRequest, db: AsyncSessionDep) -> TokenResponse:
+@limiter.limit("10/minute", key_func=get_remote_address)
+async def refresh(request: Request, body: RefreshRequest, db: AsyncSessionDep) -> TokenResponse:
     """Rotate refresh token. Old token is revoked; new pair is issued."""
     token_hash = _hash(body.refresh_token)
     now = datetime.now(timezone.utc)
@@ -120,7 +124,9 @@ async def refresh(body: RefreshRequest, db: AsyncSessionDep) -> TokenResponse:
 
 
 @router.post("/logout", status_code=204)
+@limiter.limit("20/minute", key_func=get_remote_address)
 async def logout(
+    request: Request,
     body: LogoutRequest,
     current_user: CurrentUserDep,
     db: AsyncSessionDep,
