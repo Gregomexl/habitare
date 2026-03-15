@@ -1,7 +1,7 @@
 import uuid
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select, text
-from app.api.deps import AsyncSessionDep, TenantIdDep
+from sqlalchemy import select
+from app.api.deps import AsyncSessionDep, TenantIdDep, set_rls
 from app.models.invitation import Invitation, InvitationStatus
 from app.models.qr_code import QRCode
 from app.models.user import User
@@ -19,14 +19,10 @@ def _get_base_url() -> str:
     return getattr(settings, "base_url", "http://localhost:8000")
 
 
-async def _set_rls(db, tenant_id: uuid.UUID) -> None:
-    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
-
-
 @router.post("/invitations/", response_model=InvitationResponse, status_code=201)
 async def create_invitation(body: InvitationCreate, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = InvitationService(db)
         invitation = await service.create(
             tenant_id=tenant_id,
@@ -41,7 +37,7 @@ async def create_invitation(body: InvitationCreate, db: AsyncSessionDep, tenant_
 @router.get("/invitations/{invitation_id}", response_model=InvitationResponse)
 async def get_invitation(invitation_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         result = await db.execute(select(Invitation).where(Invitation.id == invitation_id))
         invitation = result.scalar_one_or_none()
     if not invitation:
@@ -52,17 +48,16 @@ async def get_invitation(invitation_id: uuid.UUID, db: AsyncSessionDep, tenant_i
 @router.post("/invitations/{invitation_id}/revoke")
 async def revoke_invitation(invitation_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         result = await db.execute(select(Invitation).where(Invitation.id == invitation_id))
         invitation = result.scalar_one_or_none()
         if not invitation:
             raise HTTPException(status_code=404, detail="Invitation not found")
         service = InvitationService(db)
         await service.revoke(invitation)
-        # Also revoke associated QR
+        # Also revoke associated QR codes (may be more than one)
         qr_result = await db.execute(select(QRCode).where(QRCode.visit_id == invitation.visit_id))
-        qr = qr_result.scalar_one_or_none()
-        if qr:
+        for qr in qr_result.scalars().all():
             qr.is_revoked = True
     return {"detail": "Invitation revoked"}
 
@@ -85,7 +80,7 @@ async def get_pass(token: str, db: AsyncSessionDep):
     from datetime import datetime, timezone
 
     async with db.begin():
-        await db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+        await set_rls(db, tenant_id)
 
         result = await db.execute(
             select(Invitation).where(Invitation.token == token)

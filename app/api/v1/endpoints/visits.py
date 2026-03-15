@@ -1,18 +1,14 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select, text
-from app.api.deps import AsyncSessionDep, TenantIdDep
+from sqlalchemy import select
+from app.api.deps import AsyncSessionDep, TenantIdDep, set_rls
 from app.models.qr_code import QRCode, QRCodeType
 from app.schemas.visit import VisitCreate, VisitResponse
 from app.services.visit_service import VisitService, VisitStateError
 from app.services.invitation_service import InvitationService
 
 router = APIRouter(prefix="/visits", tags=["visits"])
-
-
-async def _set_rls(db, tenant_id: uuid.UUID) -> None:
-    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
 
 
 def _make_qr(visit_id: uuid.UUID, tenant_id: uuid.UUID, scheduled_at: datetime | None) -> QRCode:
@@ -37,7 +33,7 @@ def _make_qr(visit_id: uuid.UUID, tenant_id: uuid.UUID, scheduled_at: datetime |
 @router.post("/", response_model=VisitResponse, status_code=201)
 async def create_visit(body: VisitCreate, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitService(db)
         visit = await service.create(
             tenant_id=tenant_id,
@@ -64,16 +60,19 @@ async def list_visits(
 ):
     from app.models.visit import VisitStatus
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitService(db)
-        visit_status = VisitStatus(status) if status else None
+        try:
+            visit_status = VisitStatus(status) if status else None
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"Invalid status value: {status}")
         return await service.list(status=visit_status, limit=min(limit, 200), offset=offset)
 
 
 @router.get("/{visit_id}", response_model=VisitResponse)
 async def get_visit(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitService(db)
         visit = await service.get_by_id(visit_id)
     if not visit:
@@ -84,7 +83,7 @@ async def get_visit(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantI
 @router.post("/{visit_id}/check-in", response_model=VisitResponse)
 async def check_in(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitService(db)
         visit = await service.get_by_id(visit_id)
         if not visit:
@@ -99,7 +98,7 @@ async def check_in(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantId
 @router.post("/{visit_id}/check-out", response_model=VisitResponse)
 async def check_out(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitService(db)
         visit = await service.get_by_id(visit_id)
         if not visit:
@@ -114,7 +113,7 @@ async def check_out(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantI
 @router.post("/{visit_id}/cancel", response_model=VisitResponse)
 async def cancel_visit(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitService(db)
         visit = await service.get_by_id(visit_id)
         if not visit:

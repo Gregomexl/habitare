@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select, text
 from app.api.deps import AsyncSessionDep
@@ -22,3 +23,15 @@ async def get_stats(db: AsyncSessionDep):
     async with db.begin():
         tenant_count = await db.execute(text("SELECT COUNT(*) FROM tenants"))
         return {"total_tenants": tenant_count.scalar()}
+
+
+@router.post("/tenants/", response_model=TenantResponse, status_code=201)
+async def create_tenant(db: AsyncSessionDep):
+    # Stub — Phase 1 auth will add SUPER_ADMIN guard
+    raise HTTPException(status_code=501, detail="Not implemented")
+
+
+@router.put("/tenants/{tenant_id}", response_model=TenantResponse)
+async def update_tenant(tenant_id: uuid.UUID, db: AsyncSessionDep):
+    # Stub — Phase 1 auth will add SUPER_ADMIN guard
+    raise HTTPException(status_code=501, detail="Not implemented")

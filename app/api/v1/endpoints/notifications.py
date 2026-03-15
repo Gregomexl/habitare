@@ -1,7 +1,7 @@
 import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy import select, text
-from app.api.deps import AsyncSessionDep, TenantIdDep
+from sqlalchemy import select
+from app.api.deps import AsyncSessionDep, TenantIdDep, set_rls
 from app.core.ws_manager import ws_manager
 from app.models.notification import Notification
 from app.schemas.notification import NotificationResponse
@@ -35,7 +35,7 @@ async def list_notifications(
     offset: int = 0,
 ):
     async with db.begin():
-        await db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+        await set_rls(db, tenant_id)
         result = await db.execute(
             select(Notification)
             .order_by(Notification.created_at.desc())

@@ -5,6 +5,7 @@ Database session and authentication dependencies
 import uuid
 from typing import Annotated, AsyncGenerator
 from fastapi import Depends, Header, HTTPException
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session
@@ -38,3 +39,8 @@ async def get_tenant_id(
 
 
 TenantIdDep = Annotated[uuid.UUID, Depends(get_tenant_id)]
+
+
+async def set_rls(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Set session-local RLS variable. Must be called inside an active transaction."""
+    await db.execute(sql_text("SET LOCAL app.current_tenant_id = :tid"), {"tid": str(tenant_id)})

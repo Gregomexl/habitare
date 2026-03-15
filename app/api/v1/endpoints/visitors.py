@@ -1,21 +1,16 @@
 import uuid
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import text
-from app.api.deps import AsyncSessionDep, TenantIdDep
+from app.api.deps import AsyncSessionDep, TenantIdDep, set_rls
 from app.schemas.visitor import VisitorCreate, VisitorUpdate, VisitorResponse
 from app.services.visitor_service import VisitorService
 
 router = APIRouter(prefix="/visitors", tags=["visitors"])
 
 
-async def _set_rls(db, tenant_id: uuid.UUID) -> None:
-    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
-
-
 @router.post("/", response_model=VisitorResponse, status_code=201)
 async def create_visitor(body: VisitorCreate, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitorService(db)
         visitor = await service.create_or_get(
             tenant_id=tenant_id,
@@ -36,7 +31,7 @@ async def list_visitors(
     offset: int = 0,
 ):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitorService(db)
         return await service.list(search=search, limit=min(limit, 200), offset=offset)
 
@@ -44,7 +39,7 @@ async def list_visitors(
 @router.get("/{visitor_id}", response_model=VisitorResponse)
 async def get_visitor(visitor_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitorService(db)
         visitor = await service.get_by_id(visitor_id)
     if not visitor:
@@ -55,7 +50,7 @@ async def get_visitor(visitor_id: uuid.UUID, db: AsyncSessionDep, tenant_id: Ten
 @router.put("/{visitor_id}", response_model=VisitorResponse)
 async def update_visitor(visitor_id: uuid.UUID, body: VisitorUpdate, db: AsyncSessionDep, tenant_id: TenantIdDep):
     async with db.begin():
-        await _set_rls(db, tenant_id)
+        await set_rls(db, tenant_id)
         service = VisitorService(db)
         visitor = await service.get_by_id(visitor_id)
         if not visitor:
