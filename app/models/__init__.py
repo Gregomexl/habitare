@@ -7,6 +7,7 @@ This is required for Alembic migrations to detect model changes.
 from app.models.base import Base, TenantMixin, TimestampMixin
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
+from app.models.token import RefreshToken  # noqa: F401
 from app.models.visitor import Visitor
 from app.models.visit import Visit, VisitStatus
 from app.models.qr_code import QRCode, QRCodeType

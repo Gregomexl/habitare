@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select
-from app.api.deps import AsyncSessionDep, TenantIdDep, set_rls
+from app.api.deps import AsyncSessionDep, CurrentUserDep, set_rls
 from app.models.qr_code import QRCode, QRCodeType
 from app.models.invitation import Invitation
 from app.schemas.qr_code import QRCodeResponse, QRScanResponse
@@ -14,14 +14,14 @@ router = APIRouter(prefix="/qr", tags=["qr"])
 
 
 @router.get("/{code}", response_model=QRScanResponse)
-async def scan_qr(code: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
+async def scan_qr(code: uuid.UUID, db: AsyncSessionDep, current_user: CurrentUserDep):
     """Staff scan endpoint. Validates QR, triggers check-in + notifications."""
     from app.services.notification_service import NotificationService
     from app.models.user import User
     from app.models.visitor import Visitor
 
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         qr_service = QRService(db)
         try:
             qr = await qr_service.validate_and_consume(code)
@@ -31,27 +31,23 @@ async def scan_qr(code: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
         visit_service = VisitService(db)
         visit = await visit_service.check_in(qr.visit_id)
 
-        # Load visitor name for response
         visitor_result = await db.execute(select(Visitor).where(Visitor.id == visit.visitor_id))
         visitor = visitor_result.scalar_one()
 
-        # Load host email for notification (nullable)
         host_email = None
         if visit.host_id:
             host_result = await db.execute(select(User).where(User.id == visit.host_id))
             host = host_result.scalar_one_or_none()
             host_email = host.email if host else None
 
-        # Capture values before transaction closes
         visit_id = visit.id
         visitor_name = visitor.name
         checked_in_at = visit.checked_in_at
         host_id = visit.host_id
 
-    # Notify AFTER transaction commits (avoids holding DB connection during HTTP call)
     notif_service = NotificationService(db)
     await notif_service.notify_checkin(
-        tenant_id=tenant_id,
+        tenant_id=current_user.tenant_id,
         visit_id=visit_id,
         host_id=host_id,
         visitor_name=visitor_name,
@@ -67,12 +63,7 @@ async def scan_qr(code: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
 
 @router.get("/{code}/image.png")
 async def get_qr_image(code: uuid.UUID, token: str, db: AsyncSessionDep):
-    """Return PNG QR image. Protected by invitation token query param.
-
-    Validates that the token belongs to an invitation for this QR code's visit.
-    This is a public endpoint — no staff JWT required.
-    """
-    # Parse tenant_id from token prefix ({tenant_id}.{random})
+    """Return PNG QR image. Protected by invitation token query param (public — no JWT)."""
     try:
         tenant_id_str, _ = token.split(".", 1)
         tenant_id = uuid.UUID(tenant_id_str)
@@ -81,12 +72,10 @@ async def get_qr_image(code: uuid.UUID, token: str, db: AsyncSessionDep):
 
     async with db.begin():
         await set_rls(db, tenant_id)
-        # Confirm QR code exists in this tenant
         qr_result = await db.execute(select(QRCode).where(QRCode.code == code))
         qr = qr_result.scalar_one_or_none()
         if not qr:
             raise HTTPException(status_code=404, detail="QR code not found")
-        # Confirm invitation token belongs to this visit
         inv_result = await db.execute(
             select(Invitation).where(
                 Invitation.token == token,
@@ -101,9 +90,9 @@ async def get_qr_image(code: uuid.UUID, token: str, db: AsyncSessionDep):
 
 
 @router.post("/{code}/revoke")
-async def revoke_qr(code: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
+async def revoke_qr(code: uuid.UUID, db: AsyncSessionDep, current_user: CurrentUserDep):
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         result = await db.execute(select(QRCode).where(QRCode.code == code))
         qr = result.scalar_one_or_none()
         if not qr:
@@ -113,13 +102,13 @@ async def revoke_qr(code: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep
 
 
 @router.post("/{visit_id}/generate", response_model=QRCodeResponse, status_code=201)
-async def generate_qr(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
+async def generate_qr(visit_id: uuid.UUID, db: AsyncSessionDep, current_user: CurrentUserDep):
     """Explicit QR generation — walk-in fast path."""
     now = datetime.now(timezone.utc)
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         qr = QRCode(
-            tenant_id=tenant_id,
+            tenant_id=current_user.tenant_id,
             visit_id=visit_id,
             type=QRCodeType.ONE_TIME,
             valid_from=now,

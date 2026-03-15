@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
-from app.api.deps import AsyncSessionDep, TenantIdDep, set_rls
+from app.api.deps import AsyncSessionDep, CurrentUserDep, set_rls
 from app.models.qr_code import QRCode, QRCodeType
 from app.schemas.visit import VisitCreate, VisitResponse
 from app.services.visit_service import VisitService, VisitStateError
@@ -31,21 +31,21 @@ def _make_qr(visit_id: uuid.UUID, tenant_id: uuid.UUID, scheduled_at: datetime |
 
 
 @router.post("/", response_model=VisitResponse, status_code=201)
-async def create_visit(body: VisitCreate, db: AsyncSessionDep, tenant_id: TenantIdDep):
+async def create_visit(body: VisitCreate, db: AsyncSessionDep, current_user: CurrentUserDep):
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         service = VisitService(db)
         visit = await service.create(
-            tenant_id=tenant_id,
+            tenant_id=current_user.tenant_id,
             visitor_id=body.visitor_id,
             host_id=body.host_id,
             purpose=body.purpose,
             scheduled_at=body.scheduled_at,
         )
-        qr = _make_qr(visit.id, tenant_id, body.scheduled_at)
+        qr = _make_qr(visit.id, current_user.tenant_id, body.scheduled_at)
         db.add(qr)
         inv_service = InvitationService(db)
-        await inv_service.create(tenant_id=tenant_id, visit_id=visit.id)
+        await inv_service.create(tenant_id=current_user.tenant_id, visit_id=visit.id)
         await db.flush()
     return visit
 
@@ -53,14 +53,14 @@ async def create_visit(body: VisitCreate, db: AsyncSessionDep, tenant_id: Tenant
 @router.get("/", response_model=list[VisitResponse])
 async def list_visits(
     db: AsyncSessionDep,
-    tenant_id: TenantIdDep,
+    current_user: CurrentUserDep,
     status: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
     from app.models.visit import VisitStatus
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         service = VisitService(db)
         try:
             visit_status = VisitStatus(status) if status else None
@@ -70,9 +70,9 @@ async def list_visits(
 
 
 @router.get("/{visit_id}", response_model=VisitResponse)
-async def get_visit(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
+async def get_visit(visit_id: uuid.UUID, db: AsyncSessionDep, current_user: CurrentUserDep):
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         service = VisitService(db)
         visit = await service.get_by_id(visit_id)
     if not visit:
@@ -81,9 +81,9 @@ async def get_visit(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantI
 
 
 @router.post("/{visit_id}/check-in", response_model=VisitResponse)
-async def check_in(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
+async def check_in(visit_id: uuid.UUID, db: AsyncSessionDep, current_user: CurrentUserDep):
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         service = VisitService(db)
         visit = await service.get_by_id(visit_id)
         if not visit:
@@ -96,9 +96,9 @@ async def check_in(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantId
 
 
 @router.post("/{visit_id}/check-out", response_model=VisitResponse)
-async def check_out(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
+async def check_out(visit_id: uuid.UUID, db: AsyncSessionDep, current_user: CurrentUserDep):
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         service = VisitService(db)
         visit = await service.get_by_id(visit_id)
         if not visit:
@@ -111,9 +111,9 @@ async def check_out(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantI
 
 
 @router.post("/{visit_id}/cancel", response_model=VisitResponse)
-async def cancel_visit(visit_id: uuid.UUID, db: AsyncSessionDep, tenant_id: TenantIdDep):
+async def cancel_visit(visit_id: uuid.UUID, db: AsyncSessionDep, current_user: CurrentUserDep):
     async with db.begin():
-        await set_rls(db, tenant_id)
+        await set_rls(db, current_user.tenant_id)
         service = VisitService(db)
         visit = await service.get_by_id(visit_id)
         if not visit:
