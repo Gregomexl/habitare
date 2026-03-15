@@ -1,12 +1,12 @@
 import uuid
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from app.models.invitation import InvitationStatus
 
 
 class InvitationCreate(BaseModel):
     visit_id: uuid.UUID
-    sent_to_email: str | None = None
+    sent_to_email: EmailStr | None = None
 
 
 class InvitationResponse(BaseModel):
