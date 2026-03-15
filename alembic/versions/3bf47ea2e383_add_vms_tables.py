@@ -41,7 +41,7 @@ def upgrade() -> None:
     sa.Column('visitor_id', sa.UUID(), nullable=False),
     sa.Column('host_id', sa.UUID(), nullable=True),
     sa.Column('purpose', sa.String(length=500), nullable=False),
-    sa.Column('status', sa.Enum('SCHEDULED', 'CHECKED_IN', 'CHECKED_OUT', 'CANCELLED', name='visitstatus'), nullable=False),
+    sa.Column('status', sa.Enum('scheduled', 'checked_in', 'checked_out', 'cancelled', name='visitstatus'), nullable=False),
     sa.Column('scheduled_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('checked_in_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('checked_out_at', sa.DateTime(timezone=True), nullable=True),
@@ -59,7 +59,7 @@ def upgrade() -> None:
     sa.Column('visit_id', sa.UUID(), nullable=False),
     sa.Column('sent_to_email', sa.String(length=255), nullable=True),
     sa.Column('token', sa.String(length=500), nullable=False),
-    sa.Column('status', sa.Enum('PENDING', 'VIEWED', 'EXPIRED', name='invitationstatus'), nullable=False),
+    sa.Column('status', sa.Enum('pending', 'viewed', 'expired', name='invitationstatus'), nullable=False),
     sa.Column('sent_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('tenant_id', sa.UUID(), nullable=False, comment='Tenant (property) identifier for multi-tenancy'),
@@ -74,9 +74,9 @@ def upgrade() -> None:
     op.create_table('notifications',
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('visit_id', sa.UUID(), nullable=False),
-    sa.Column('channel', sa.Enum('EMAIL', 'WEBSOCKET', name='notificationchannel'), nullable=False),
+    sa.Column('channel', sa.Enum('email', 'websocket', name='notificationchannel'), nullable=False),
     sa.Column('recipient_id', sa.UUID(), nullable=True),
-    sa.Column('status', sa.Enum('QUEUED', 'SENT', 'FAILED', name='notificationstatus'), nullable=False),
+    sa.Column('status', sa.Enum('queued', 'sent', 'failed', name='notificationstatus'), nullable=False),
     sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
     sa.Column('sent_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('tenant_id', sa.UUID(), nullable=False, comment='Tenant (property) identifier for multi-tenancy'),
@@ -92,7 +92,7 @@ def upgrade() -> None:
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('visit_id', sa.UUID(), nullable=False),
     sa.Column('code', sa.UUID(), nullable=False),
-    sa.Column('type', sa.Enum('ONE_TIME', 'TIME_BOUNDED', name='qrcodetype'), nullable=False),
+    sa.Column('type', sa.Enum('one_time', 'time_bounded', name='qrcodetype'), nullable=False),
     sa.Column('valid_from', sa.DateTime(timezone=True), nullable=False),
     sa.Column('valid_until', sa.DateTime(timezone=True), nullable=False),
     sa.Column('used_at', sa.DateTime(timezone=True), nullable=True),
@@ -115,6 +115,7 @@ def upgrade() -> None:
         op.execute(f"""
             CREATE POLICY tenant_isolation ON {table}
             USING (tenant_id::text = current_setting('app.current_tenant_id', TRUE))
+            WITH CHECK (tenant_id::text = current_setting('app.current_tenant_id', TRUE))
         """)
 
 
@@ -143,3 +144,10 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_visitors_email'), table_name='visitors')
     op.drop_table('visitors')
     # ### end Alembic commands ###
+
+    # Drop named enum types that were created with the tables
+    op.execute("DROP TYPE IF EXISTS visitstatus")
+    op.execute("DROP TYPE IF EXISTS invitationstatus")
+    op.execute("DROP TYPE IF EXISTS qrcodetype")
+    op.execute("DROP TYPE IF EXISTS notificationchannel")
+    op.execute("DROP TYPE IF EXISTS notificationstatus")
