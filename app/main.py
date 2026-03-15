@@ -17,6 +17,14 @@ from app.api.exception_handlers import (
     unhandled_exception_handler,
     validation_exception_handler,
 )
+from app.api.v1.endpoints.admin import router as admin_router
+from app.api.v1.endpoints.auth import router as auth_router
+from app.api.v1.endpoints.invitations import router as invitations_router
+from app.api.v1.endpoints.notifications import router as notifications_router
+from app.api.v1.endpoints.qr import router as qr_router
+from app.api.v1.endpoints.users import router as users_router
+from app.api.v1.endpoints.visitors import router as visitors_router
+from app.api.v1.endpoints.visits import router as visits_router
 from app.core.config import settings
 from app.core.limiter import limiter
 from app.middleware.request_id import RequestIDMiddleware
@@ -66,15 +74,6 @@ async def validate_config() -> None:
     )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from app.api.v1.endpoints.auth import router as auth_router
-from app.api.v1.endpoints.users import router as users_router
-from app.api.v1.endpoints.visitors import router as visitors_router
-from app.api.v1.endpoints.visits import router as visits_router
-from app.api.v1.endpoints.invitations import router as invitations_router
-from app.api.v1.endpoints.qr import router as qr_router
-from app.api.v1.endpoints.notifications import router as notifications_router
-from app.api.v1.endpoints.admin import router as admin_router
-
 API_PREFIX = "/api/v1"
 app.include_router(auth_router, prefix=API_PREFIX)
 app.include_router(users_router, prefix=API_PREFIX)
@@ -88,9 +87,9 @@ app.include_router(admin_router, prefix=API_PREFIX)
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Habitare API is running", "version": "0.1.0"}
+    return {"status": "ok", "message": "Habitare API is running", "version": app.version}
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "habitare-api", "version": "0.1.0"}
+    return {"status": "healthy", "service": "habitare-api", "version": app.version}
