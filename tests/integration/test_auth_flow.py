@@ -6,6 +6,7 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.core.database import async_session, engine
 from app.core.security import hash_password
 from app.main import app
@@ -48,6 +49,8 @@ async def seed_auth_data():
     yield
 
     async with async_session() as db:
+        # Two separate transactions: first DELETE users (RLS requires SET LOCAL),
+        # then DELETE tenants (no RLS — cannot share a transaction or SET LOCAL expires).
         async with db.begin():
             await db.execute(
                 text(f"SET LOCAL app.current_tenant_id = '{TENANT_ID}'")
@@ -62,45 +65,43 @@ async def seed_auth_data():
     await engine.dispose()
 
 
-@pytest.fixture
-def client():
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+@pytest_asyncio.fixture(loop_scope="module")
+async def client():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
 
 
 async def test_login_returns_token_pair(client):
-    async with client as c:
-        resp = await c.post(
-            "/api/v1/auth/login",
-            json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
-        )
+    resp = await client.post(
+        "/api/v1/auth/login",
+        json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert "access_token" in data
     assert "refresh_token" in data
     assert data["token_type"] == "bearer"
-    assert data["expires_in"] == 1800
+    assert data["expires_in"] == settings.access_token_expire_minutes * 60
 
 
 async def test_login_wrong_password_returns_401(client):
-    async with client as c:
-        resp = await c.post(
-            "/api/v1/auth/login",
-            json={"email": USER_EMAIL, "password": "wrong", "tenant_id": TENANT_ID},
-        )
+    resp = await client.post(
+        "/api/v1/auth/login",
+        json={"email": USER_EMAIL, "password": "wrong", "tenant_id": TENANT_ID},
+    )
     assert resp.status_code == 401
 
 
 async def test_users_me_with_valid_token(client):
-    async with client as c:
-        login = await c.post(
-            "/api/v1/auth/login",
-            json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
-        )
-        access_token = login.json()["access_token"]
-        resp = await c.get(
-            "/api/v1/users/me",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
+    )
+    access_token = login.json()["access_token"]
+    resp = await client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
     assert resp.status_code == 200
     me = resp.json()
     assert me["email"] == USER_EMAIL
@@ -108,22 +109,20 @@ async def test_users_me_with_valid_token(client):
 
 
 async def test_users_me_without_token_returns_401(client):
-    async with client as c:
-        resp = await c.get("/api/v1/users/me")
+    resp = await client.get("/api/v1/users/me")
     assert resp.status_code == 401
 
 
 async def test_refresh_returns_new_token_pair(client):
-    async with client as c:
-        login = await c.post(
-            "/api/v1/auth/login",
-            json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
-        )
-        refresh_token = login.json()["refresh_token"]
-        resp = await c.post(
-            "/api/v1/auth/refresh",
-            json={"refresh_token": refresh_token},
-        )
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
+    )
+    refresh_token = login.json()["refresh_token"]
+    resp = await client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": refresh_token},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert "access_token" in data
@@ -131,60 +130,56 @@ async def test_refresh_returns_new_token_pair(client):
 
 
 async def test_old_refresh_token_rejected_after_rotation(client):
-    async with client as c:
-        login = await c.post(
-            "/api/v1/auth/login",
-            json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
-        )
-        old_refresh = login.json()["refresh_token"]
-        # Rotate
-        await c.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
-        # Try old token again
-        resp = await c.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
+    )
+    old_refresh = login.json()["refresh_token"]
+    # Rotate
+    await client.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
+    # Try old token again
+    resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
     assert resp.status_code == 401
 
 
 async def test_logout_revokes_refresh_token(client):
-    async with client as c:
-        login = await c.post(
-            "/api/v1/auth/login",
-            json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
-        )
-        tokens = login.json()
-        access_token = tokens["access_token"]
-        refresh_token = tokens["refresh_token"]
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
+    )
+    tokens = login.json()
+    access_token = tokens["access_token"]
+    refresh_token = tokens["refresh_token"]
 
-        logout = await c.post(
-            "/api/v1/auth/logout",
-            json={"refresh_token": refresh_token},
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        assert logout.status_code == 204
+    logout = await client.post(
+        "/api/v1/auth/logout",
+        json={"refresh_token": refresh_token},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert logout.status_code == 204
 
-        # Revoked token rejected
-        resp = await c.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+    # Revoked token rejected
+    resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
     assert resp.status_code == 401
 
 
 async def test_protected_endpoint_with_valid_token(client):
     """Visitors endpoint respects JWT tenant scope."""
-    async with client as c:
-        login = await c.post(
-            "/api/v1/auth/login",
-            json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
-        )
-        access_token = login.json()["access_token"]
-        resp = await c.get(
-            "/api/v1/visitors/",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
+    )
+    access_token = login.json()["access_token"]
+    resp = await client.get(
+        "/api/v1/visitors/",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
 
 
 async def test_protected_endpoint_without_token_returns_401(client):
-    async with client as c:
-        resp = await c.get("/api/v1/visitors/")
+    resp = await client.get("/api/v1/visitors/")
     assert resp.status_code == 401
 
 
@@ -227,22 +222,21 @@ async def test_cross_tenant_token_cannot_see_other_tenant_data(client):
                 {"id": visitor_b_id, "tid": tenant_b_id},
             )
 
-    async with client as c:
-        # Login as tenant A user
-        login_a = await c.post(
-            "/api/v1/auth/login",
-            json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
-        )
-        token_a = login_a.json()["access_token"]
+    # Login as tenant A user
+    login_a = await client.post(
+        "/api/v1/auth/login",
+        json={"email": USER_EMAIL, "password": USER_PASSWORD, "tenant_id": TENANT_ID},
+    )
+    token_a = login_a.json()["access_token"]
 
-        # Tenant A token → tenant A visitors list (should not contain tenant B visitor)
-        resp = await c.get(
-            "/api/v1/visitors/",
-            headers={"Authorization": f"Bearer {token_a}"},
-        )
-        assert resp.status_code == 200
-        visitor_ids = [v["id"] for v in resp.json()]
-        assert visitor_b_id not in visitor_ids
+    # Tenant A token → tenant A visitors list (should not contain tenant B visitor)
+    resp = await client.get(
+        "/api/v1/visitors/",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert resp.status_code == 200
+    visitor_ids = [v["id"] for v in resp.json()]
+    assert visitor_b_id not in visitor_ids
 
     # Cleanup tenant B
     async with async_session() as db:
@@ -258,4 +252,3 @@ async def test_cross_tenant_token_cannot_see_other_tenant_data(client):
             await db.execute(
                 text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_b_id}
             )
-    await engine.dispose()
