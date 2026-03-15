@@ -229,7 +229,7 @@ class RequestIDMiddleware:
 
         request = Request(scope)
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-        scope["state"]["request_id"] = request_id  # accessible as request.state.request_id
+        request.state.request_id = request_id  # accessible as request.state.request_id in handlers
 
         async def send_with_header(message):
             if message["type"] == "http.response.start":
