@@ -32,14 +32,14 @@ class Notification(Base, TenantMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("visits.id"), nullable=False, index=True
     )
     channel: Mapped[NotificationChannel] = mapped_column(
-        SAEnum(NotificationChannel, name="notificationchannel"), nullable=False
+        SAEnum(NotificationChannel, name="notificationchannel", values_callable=lambda x: [e.value for e in x]), nullable=False
     )
     # nullable — null for broadcast WS or when host is absent
     recipient_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     status: Mapped[NotificationStatus] = mapped_column(
-        SAEnum(NotificationStatus, name="notificationstatus"), nullable=False, default=NotificationStatus.QUEUED
+        SAEnum(NotificationStatus, name="notificationstatus", values_callable=lambda x: [e.value for e in x]), nullable=False, default=NotificationStatus.QUEUED
     )
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

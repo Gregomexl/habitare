@@ -30,7 +30,7 @@ class QRCode(Base, TenantMixin, TimestampMixin):
         UUID(as_uuid=True), nullable=False, default=uuid.uuid4, unique=True, index=False
     )
     type: Mapped[QRCodeType] = mapped_column(
-        SAEnum(QRCodeType, name="qrcodetype"), nullable=False
+        SAEnum(QRCodeType, name="qrcodetype", values_callable=lambda x: [e.value for e in x]), nullable=False
     )
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

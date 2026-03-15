@@ -29,7 +29,7 @@ class Invitation(Base, TenantMixin, TimestampMixin):
     # Signed token used in the pass link URL — /pass/{token}
     token: Mapped[str] = mapped_column(String(500), nullable=False, unique=True, index=True)
     status: Mapped[InvitationStatus] = mapped_column(
-        SAEnum(InvitationStatus, name="invitationstatus"), nullable=False, default=InvitationStatus.PENDING
+        SAEnum(InvitationStatus, name="invitationstatus", values_callable=lambda x: [e.value for e in x]), nullable=False, default=InvitationStatus.PENDING
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
