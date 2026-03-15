@@ -1,7 +1,7 @@
 """User endpoints: profile retrieval and management."""
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
@@ -58,7 +58,7 @@ async def update_me(
             user.phone_number = body.phone_number
         if body.unit_number is not None:
             user.unit_number = body.unit_number
-        user.updated_at = datetime.now(timezone.utc)
+        user.updated_at = datetime.utcnow()
 
     return UserResponse.model_validate(user)
 
@@ -157,6 +157,6 @@ async def update_user(
             user.is_active = body.is_active
         if body.role is not None:
             user.role = body.role
-        user.updated_at = datetime.now(timezone.utc)
+        user.updated_at = datetime.utcnow()
 
     return UserResponse.model_validate(user)
