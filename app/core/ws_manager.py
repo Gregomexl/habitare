@@ -2,10 +2,14 @@
 
 This is a module-level singleton. Import and use `ws_manager` directly.
 """
+import json
+import logging
 import uuid
 from collections import defaultdict
 
 from fastapi import WebSocket
+
+logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
@@ -24,9 +28,6 @@ class ConnectionManager:
 
     async def broadcast(self, tenant_id: uuid.UUID, message: dict) -> None:
         """Send message to all connected staff in a tenant. Fire-and-forget."""
-        import json
-        import logging
-        logger = logging.getLogger(__name__)
         key = str(tenant_id)
         dead = []
         for ws in list(self._connections[key]):

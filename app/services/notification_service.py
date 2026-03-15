@@ -3,10 +3,16 @@
 No retry logic in Phase 2. Failed sends are logged with status=FAILED.
 Do NOT use BackgroundTasks for retry — it doesn't support backoff.
 """
+import logging
 import uuid
 from datetime import datetime, timezone
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 from app.core.ws_manager import ws_manager
 from app.models.notification import Notification, NotificationChannel, NotificationStatus
@@ -69,8 +75,6 @@ class NotificationService:
             # Requires HABITARE_SENDGRID_API_KEY in settings
             # and HABITARE_FROM_EMAIL for the sender address.
             # If settings.sendgrid_api_key is empty, raises ValueError → FAILED logged.
-            import httpx
-            from app.core.config import settings
             if not getattr(settings, "sendgrid_api_key", None):
                 raise ValueError("HABITARE_SENDGRID_API_KEY not configured")
             async with httpx.AsyncClient() as client:
@@ -89,8 +93,7 @@ class NotificationService:
             notification.status = NotificationStatus.SENT
             notification.sent_at = datetime.now(timezone.utc)
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning("Email send failed for visit %s: %s", visit_id, exc)
+            logger.warning("Email send failed for visit %s: %s", visit_id, exc)
             notification.status = NotificationStatus.FAILED
 
         await self.db.flush()
