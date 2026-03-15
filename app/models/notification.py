@@ -43,6 +43,9 @@ class Notification(Base, TenantMixin, TimestampMixin):
     )
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retry_count: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default="0"
+    )
 
     def __repr__(self) -> str:
         return f"<Notification(id={self.id}, channel={self.channel}, status={self.status})>"
