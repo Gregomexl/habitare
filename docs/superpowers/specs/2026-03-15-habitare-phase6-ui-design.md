@@ -233,7 +233,7 @@ frontend/
     utils.ts                      # cn(), formatDate(), statusBadgeVariant()
   providers.tsx                   # "use client" — QueryClientProvider + AuthProvider
   next.config.ts                  # API proxy rewrites
-  .env.local.example              # NEXT_PUBLIC_API_URL template
+  .env.local.example              # API_URL=http://localhost:8001 template
 ```
 
 ---
@@ -365,7 +365,7 @@ Response includes `temp_password` — displayed once in a success toast/dialog t
 | Invitations list | GET | `/api/invitations/` | — |
 | Create invitation | POST | `/api/invitations/` | `{ visitor_email, visitor_name, unit_number?, expires_at }` |
 | Users list | GET | `/api/users/` | — |
-| Create user | POST | `/api/users/` | `{ email, full_name?, role }` |
+| Create user | POST | `/api/users/` | `{ email, full_name?, phone_number?, unit_number?, role }` |
 | Deactivate/reactivate user | PUT | `/api/users/{id}` | `{ is_active: boolean }` |
 | Profile (read) | GET | `/api/users/me` | — |
 | Profile (update) | PUT | `/api/users/me` | `{ full_name?, phone_number?, unit_number? }` |
