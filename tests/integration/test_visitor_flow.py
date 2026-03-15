@@ -5,7 +5,7 @@ import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import text, select
 from app.main import app
-from app.core.database import async_session
+from app.core.database import async_session, engine
 from app.models.qr_code import QRCode
 from app.models.invitation import Invitation
 
@@ -15,7 +15,12 @@ HEADERS = {"X-Tenant-Id": TENANT_ID}
 
 @pytest_asyncio.fixture(autouse=True)
 async def setup_tenant():
-    """Insert test tenant; delete all tenant data in FK-safe order on teardown."""
+    """Insert test tenant; delete all tenant data in FK-safe order on teardown.
+
+    Disposes the engine before and after to prevent asyncpg event-loop conflicts
+    when the full test suite runs (each test gets a fresh event loop in STRICT mode).
+    """
+    await engine.dispose()
     async with async_session() as session:
         async with session.begin():
             await session.execute(
@@ -35,6 +40,7 @@ async def setup_tenant():
                 await session.execute(text(f"DELETE FROM {table} WHERE tenant_id = '{TENANT_ID}'"))
             # tenants table has no RLS (not tenant-scoped)
             await session.execute(text(f"DELETE FROM tenants WHERE id = '{TENANT_ID}'"))
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
