@@ -32,7 +32,9 @@ class Visit(Base, TenantMixin, TimestampMixin):
     )
     purpose: Mapped[str] = mapped_column(String(500), nullable=False)
     status: Mapped[VisitStatus] = mapped_column(
-        SAEnum(VisitStatus, name="visitstatus"), nullable=False, default=VisitStatus.SCHEDULED
+        SAEnum(VisitStatus, name="visitstatus", values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=VisitStatus.SCHEDULED,
     )
     # nullable — null for walk-ins
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
