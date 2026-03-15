@@ -69,7 +69,7 @@ Everything else is a Client Component. When in doubt, add `"use client"`.
 
 ### API proxy (`next.config.ts`)
 
-In development, the Next.js dev server runs on port 3000 and the FastAPI server runs on port 8001. To avoid CORS issues, API calls are proxied through Next.js:
+In development, the Next.js dev server runs on port 3000 and the FastAPI server runs on port 8001. To avoid CORS issues, API calls are proxied through Next.js rewrites:
 
 ```ts
 // frontend/next.config.ts
@@ -78,7 +78,7 @@ const nextConfig = {
     return [
       {
         source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_URL}/:path*`,
+        destination: `${process.env.API_URL}/:path*`,
       },
     ]
   },
@@ -86,7 +86,16 @@ const nextConfig = {
 export default nextConfig
 ```
 
-`apiFetch` in `lib/api.ts` calls `/api/...` paths (not the FastAPI URL directly). In production, `NEXT_PUBLIC_API_URL` is an empty string and `/api/...` routes are reverse-proxied by the production web server (Cloudflare Tunnel / nginx). This keeps CORS out of the picture entirely.
+**Important:** Use `API_URL` (no `NEXT_PUBLIC_` prefix), not `NEXT_PUBLIC_API_URL`. The rewrite destination is evaluated by the Next.js Node.js server process, not the browser. `NEXT_PUBLIC_` variables are inlined into the browser bundle at build time and are `undefined` in `next.config.ts`, which would silently produce `undefined/:path*` as the destination and break all API calls.
+
+`apiFetch` in `lib/api.ts` calls `/api/...` paths (relative to the Next.js origin). The rewrite transparently forwards them to the FastAPI server.
+
+**Production routing:** In production (Phase 7), the Cloudflare Tunnel reverse-proxy handles routing: the Next.js app is served at `/` and the FastAPI backend at `/api/`. The Next.js rewrite block is kept but `API_URL` points to `http://localhost:8001` (the local FastAPI process on the Mac Mini). This is the same URL as development — the rewrite works identically.
+
+`.env.local.example`:
+```
+API_URL=http://localhost:8001
+```
 
 ### Auth flow
 
@@ -186,7 +195,9 @@ frontend/
       login/
         page.tsx                  # "use client" — Login form page
     (dashboard)/
-      layout.tsx                  # Server Component — renders AppLayout + ProtectedRoute
+      layout.tsx                  # Server Component — thin wrapper: <AppLayout>{children}</AppLayout>
+                                  #   Contains NO auth logic. AppLayout (Client Component) internally
+                                  #   renders ProtectedRoute which handles the useEffect auth check.
       page.tsx                    # Server Component — redirect('/visits')
       visits/page.tsx             # "use client" — Visits DataTable
       visitors/page.tsx           # "use client" — Visitors DataTable
@@ -217,7 +228,7 @@ frontend/
     visitors/
       VisitorHistorySheet.tsx     # "use client" — shadcn Sheet, shows visit history for one visitor
   lib/
-    api.ts                        # apiFetch wrapper (no "use client" needed — not a component)
+    api.ts                        # apiFetch wrapper — browser-only (uses localStorage + window); import only from Client Components
     auth.ts                       # "use client" — AuthContext, useAuth hook, decodeToken
     utils.ts                      # cn(), formatDate(), statusBadgeVariant()
   providers.tsx                   # "use client" — QueryClientProvider + AuthProvider
@@ -311,11 +322,13 @@ All list views share the `<DataTable>` component:
 - DataTable: Name, Email, Role badge, Status (Active/Inactive)
 - "Add user" button → `<CreateUserForm>` dialog modal
 - Row action dropdown: Deactivate (if active) / Reactivate (if inactive) — calls `PUT /api/users/{id}` with `{ "is_active": false }` or `{ "is_active": true }`
-- If `TENANT_USER` hits this page → `useEffect` redirects to `/visits` (same pattern as `ProtectedRoute`)
+- If `TENANT_USER` hits this page → `useEffect` redirects to `/visits` (UX convenience only — the backend independently enforces `PROPERTY_ADMIN+` authorization on `GET /api/users/` and `POST /api/users/`) (same pattern as `ProtectedRoute`)
 
 **`CreateUserForm` fields:**
 - Email (EmailStr, required)
 - Full name (string, optional)
+- Phone number (string, optional)
+- Unit number (string, optional)
 - Role (select: TENANT_USER | PROPERTY_ADMIN, required — SUPER_ADMIN excluded)
 
 **`POST /api/users/` request body:**
@@ -323,16 +336,19 @@ All list views share the `<DataTable>` component:
 {
   "email": "string",
   "full_name": "string | null",
+  "phone_number": "string | null",
+  "unit_number": "string | null",
   "role": "TENANT_USER | PROPERTY_ADMIN"
 }
 ```
-Response includes `temp_password` — displayed once in a success dialog the user must copy.
+Response includes `temp_password` — displayed once in a success toast/dialog the user must copy before dismissing.
 
 ### Settings (`/settings`)
 
 - Profile form: Full name, Phone number, Unit number
 - Save button → `PUT /api/users/me`
 - Show current email (read-only) and role (read-only)
+- On success: show success toast ("Profile updated") and update the in-memory `user` object in `AuthContext` with the new values (no full re-fetch needed — the response body contains the updated user)
 
 ---
 
@@ -362,7 +378,7 @@ All API errors are caught in `apiFetch` and thrown as `ApiError`. Each page/muta
 - Loading state: skeleton rows in DataTable, spinner on form submit buttons
 - API error: `toast` (shadcn `Sonner`) notification with `error.message` from envelope
 - 401: silent refresh attempted; on failure → redirect to login (handled in `api.ts`)
-- Validation error (422): form field errors shown inline via react-hook-form's `setError`
+- Validation error (422): `apiFetch` throws `ApiError` with `status: 422` and `detail: [{ loc, msg, type }, ...]` (the FastAPI validation array). Form components — **not** `apiFetch` — are responsible for catching this error, iterating `error.detail`, and calling react-hook-form's `setError(fieldName, { message })` per field to display inline errors. `apiFetch` itself has no knowledge of form state.
 - Network error (fetch throws): `toast` with generic "Connection error" message
 
 ---
@@ -373,7 +389,7 @@ All API errors are caught in `apiFetch` and thrown as `ApiError`. Each page/muta
 |---|---|
 | `frontend/package.json` | Next.js 15, React 19, Tailwind, shadcn, TanStack |
 | `frontend/next.config.ts` | API proxy rewrites `/api/:path*` → FastAPI |
-| `frontend/.env.local.example` | `NEXT_PUBLIC_API_URL=http://localhost:8001` |
+| `frontend/.env.local.example` | `API_URL=http://localhost:8001` |
 | `frontend/tailwind.config.ts` | Tailwind base config (shadcn integration) |
 | `frontend/components.json` | shadcn config (`style: default, rsc: false, baseColor: zinc`) |
 | `frontend/app/globals.css` | CSS variable overrides for dark palette |
