@@ -15,12 +15,6 @@ async def test_send_email_calls_resend_api(monkeypatch):
     mock_response = MagicMock()
     mock_response.raise_for_status = MagicMock()
 
-    posted_json = {}
-
-    async def mock_post(url, **kwargs):
-        posted_json.update(kwargs.get("json", {}))
-        return mock_response
-
     with patch("httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -30,11 +24,10 @@ async def test_send_email_calls_resend_api(monkeypatch):
 
         import uuid
         from app.services.notification_service import NotificationService
-        from unittest.mock import MagicMock as MM
-        db = MM()
-        db.add = MM()
+        db = MagicMock()
+        db.add = MagicMock()
         db.flush = AsyncMock()
-        db.begin = MM()
+        db.begin = MagicMock()
         db.begin.return_value.__aenter__ = AsyncMock(return_value=db)
         db.begin.return_value.__aexit__ = AsyncMock(return_value=False)
         db.execute = AsyncMock()
@@ -68,11 +61,10 @@ async def test_send_email_skipped_when_disabled(monkeypatch):
 
         import uuid
         from app.services.notification_service import NotificationService
-        from unittest.mock import MagicMock as MM
-        db = MM()
-        db.add = MM()
+        db = MagicMock()
+        db.add = MagicMock()
         db.flush = AsyncMock()
-        db.begin = MM()
+        db.begin = MagicMock()
         db.begin.return_value.__aenter__ = AsyncMock(return_value=db)
         db.begin.return_value.__aexit__ = AsyncMock(return_value=False)
         db.execute = AsyncMock()
@@ -97,12 +89,11 @@ async def test_send_email_handles_missing_host_email_gracefully(monkeypatch):
 
     import uuid
     from app.services.notification_service import NotificationService
-    from unittest.mock import AsyncMock, MagicMock as MM, patch
 
-    db = MM()
-    db.add = MM()
+    db = MagicMock()
+    db.add = MagicMock()
     db.flush = AsyncMock()
-    db.begin = MM()
+    db.begin = MagicMock()
     db.begin.return_value.__aenter__ = AsyncMock(return_value=db)
     db.begin.return_value.__aexit__ = AsyncMock(return_value=False)
     db.execute = AsyncMock()
