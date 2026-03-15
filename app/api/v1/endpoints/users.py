@@ -131,6 +131,7 @@ async def update_user(
     db: AsyncSessionDep,
 ) -> UserResponse:
     """Update a user in the caller's tenant. Requires PROPERTY_ADMIN+."""
+    # Self-edit guard first: /me has no role field so SUPER_ADMIN escalation is impossible that way.
     if user_id == current_user.user_id:
         raise HTTPException(
             status_code=400, detail="Use PUT /users/me to update your own profile"
