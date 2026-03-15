@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # Email (Resend)
+    resend_api_key: str = ""
+    from_email: str = "noreply@habitare.app"
+    email_enabled: bool = True
+
     # Environment
     environment: str = "development"
     debug: bool = True
