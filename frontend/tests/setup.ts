@@ -1,1 +1,1 @@
-import "@testing-library/jest-dom"
+// Test setup - no jest-dom needed (tests use only standard matchers)
